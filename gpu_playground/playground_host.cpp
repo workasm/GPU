@@ -266,7 +266,7 @@ static std::tuple<size_t, std::vector< InputReal >> generateGaussian(int w, int 
     const auto s_nan = std::numeric_limits< float >::quiet_NaN();
 
     int ofs = 0;
-    float sigmaX = 150, sigmaY = 190, x0 = w/2, y0 = h/2;
+    float sigmaX = 150, sigmaY = 190, x0 = w*0.5f, y0 = h*0.5f;
 
     for(int y = ofs; y < h - ofs; y++) {
         auto pin = orig.ptr< float >(y);
@@ -281,7 +281,7 @@ static std::tuple<size_t, std::vector< InputReal >> generateGaussian(int w, int 
         }
     }
 
-    srand(time(nullptr));
+    srand((uint32_t)time(nullptr));
     for(int i = 0; i < 50; i++) {
 
         double x = w*(double)rand() / (RAND_MAX+1),
@@ -342,8 +342,8 @@ void GPU_interpolator::run() {
     std::string fpath(__FILE__); // search for file in the source directory
     fpath = fpath.substr(0, fpath.find_last_of("\\/")); // what if npos ??
 
-    const auto [nSamples,in] = zobj.readFromFile(fpath + "/output_20Khz_new_500x500.bin");
-                               //generateGaussian< InputReal >(nCols, nRows, numDataSigs);
+    const auto [nSamples, in] = //zobj.readFromFile(fpath + "/output_20Khz_new_500x500.bin");
+                               generateGaussian< InputReal >(nCols, nRows, numDataSigs);
     m_nSamples = nSamples;
     word_size = 1;
     // input and output buffers are pinned memory
@@ -370,19 +370,13 @@ void GPU_interpolator::run() {
     zobj.process(cancel);
     CPU_END_TIMING(HostInterp);
 
-    for(uint32_t y = 0; y < p.h; y++) {
-        auto ptr = outImg.ptr< OutputReal >(y);
-        for(uint32_t x = 0; x < p.w; x++) {
-            ptr[x] = 1;
-        }
-    }
-    bool print_when_differs = false;
-    checkme< false >(m_devOutCPU, outImg.ptr< OutputReal >(), p.w, p.w, p.h,
-            (OutputReal)1e-3, print_when_differs, 1000);
+    bool print_if_differs = true;
+    checkme(m_devOutCPU, outImg.ptr< OutputReal >(), p.w, p.w, p.h,
+            (OutputReal)1e-3, print_if_differs, 1000);
 
     DisplayImageCV disp;
-    disp.show(cv::Mat(cv::Size(p.w, p.h), CV_32FC(p.numSignals), m_devOutCPU));
-    //disp.show(outImg);
+    //disp.show(cv::Mat(cv::Size(p.w, p.h), CV_32FC(p.numSignals), m_devOutCPU));
+//    disp.show(outImg);
 }
 
 

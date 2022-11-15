@@ -126,11 +126,11 @@ public:
             for (auto ix = ptr + ptrMin; ix <= ptr + ptrMax; dx += 1)
             {
                 OutputReal wd = dyQ + dx * dx;
-                if (wd > innerRadSq)
-                {
-                    ix += nSigs;
-                    continue;
-                }
+//                if (wd > innerRadSq)
+//                {
+//                    ix += nSigs;
+//                    continue;
+//                }
 
                 OutputReal denom = (wd < eps ? OutputReal(-1) : (OutputReal)1 / wd);
                 for (size_t i = 0; i < nSigs; i++, ix++)
@@ -138,6 +138,10 @@ public:
                     // this point is either not set (NaN) or has been set exactly..
                     if (!std::isfinite(sigs[i]) || ix->denom < 0)
                         continue;
+
+                    ix->num += (OutputReal)sigs[i], ix->denom += 1;
+                    ix->Ninner = 1;
+                    continue; ///! HACK
 
                     ix->Ninner++;
                     if (denom < 0)
@@ -250,7 +254,7 @@ public:
         const size_t totalS = m_params.numSignals + 2;
         for (auto ptr = m_scanPts.begin(); ptr != m_scanPts.end(); ptr += totalS)
         {
-            processOuterPoint(&*ptr);
+            //processOuterPoint(&*ptr);
             if (cancel.load())
             {
                 return false;

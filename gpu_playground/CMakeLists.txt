@@ -6,6 +6,7 @@
 cmake_minimum_required(VERSION 3.12)
 
 project(gpu_playground)
+include(x_cuda_compile.cmake)
 
 #set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_VERBOSE_MAKEFILE ON)
@@ -20,7 +21,7 @@ find_package(CUDA QUIET REQUIRED)
 
 set(CUDA_VERBOSE_BUILD ON)
 set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
-#set(CUDA_BUILD_CUBIN ON)
+#set(CUDA_BUILD_CUBIN OFF)
 
 include_directories(${CUDA_INCLUDE_DIRS})
 
@@ -38,7 +39,9 @@ list(APPEND CUDA_NVCC_FLAGS ${ARCH_FLAGS})
 #set(CUDA_VERBOSE_BUILD ON)
 #set(CUDA_64_BIT_DEVICE_CODE OFF)
 
-cuda_compile(CUDA_FILES ${CU})
+message(STATUS "${CU} =====================")
+
+x_cuda_compile(CUDA_FILES ${CU})
 #cuda_compile_cubin(CUBIN_FILES ${CU})
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

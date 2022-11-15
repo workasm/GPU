@@ -1,20 +1,3 @@
-// ============================================================================
-//
-// Copyright (c) 2001-2008 Max-Planck-Institut Saarbruecken (Germany).
-// All rights reserved.
-//
-// this file is not part of any library ;-)
-//
-// ----------------------------------------------------------------------------
-//
-// Library       : CUDA MP
-//
-// File          : 
-//
-// Author(s)     : Pavel Emeliyanenko <asm@mpi-sb.mpg.de>
-//
-// ============================================================================
-
 #ifndef GPU_PLAYGROUND_H
 #define GPU_PLAYGROUND_H
 
@@ -28,12 +11,25 @@
 
 #include <cuda_runtime_api.h>
 
+template <class T,
+          std::enable_if_t< !std::is_floating_point_v<T>, bool> = true >
+bool checkNaN(T) {
+    return false;
+}
+
+template <class T,
+     std::enable_if_t< std::is_floating_point_v<T>, bool> = true >
+bool checkNaN(T a) {
+    return std::isnan(a);
+}
+
+
 //! compares 2D arrays of data, \c width elements per row stored with \c stride (stride == width)
 //! number of rows given by \c n_batches
 //! \c print_when_differs :  indicates whether print elements only if they
 //! differ (default)
 //! \c print_max : maximal # of entries to print
-template < bool Reverse = true, class NT >
+template < bool Reverse = false, class NT >
 bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
         size_t n_batches, const NT& eps, bool print_when_differs = true,
              size_t print_max = std::numeric_limits< size_t >::max()) {
@@ -60,6 +56,9 @@ bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
             *ptruth = truth + j * stride;
 
         for(size_t i = ibeg; i != iend; i += inc) {
+
+            if(checkNaN(ptruth[i]) && checkNaN(pcheckit[i]))
+                continue;
 
             NT diff = pcheckit[i] - ptruth[i];
             bool isDiff = std::abs(diff) > eps;
