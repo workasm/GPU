@@ -305,6 +305,39 @@ static std::tuple<size_t, std::vector< InputReal >> generateGaussian(int w, int 
     return { w*h, out };
 }
 
+uint32_t popcnt(uint32_t val) {
+    uint32_t num = 0;
+    while(val) {
+        if(val & 1)
+            num++;
+        val >>= 1;
+    }
+    return num;
+}
+
+// 0-based position of the Nth LSB set
+uint32_t getNthBitPos(uint32_t val, uint32_t N) {
+
+    uint32_t pos = 0;
+    for(uint32_t ofs = 16; ofs != 0; ofs /= 2) {
+        auto mval = val & ((1 << ofs)-1);
+        auto dif = (int)(N - popcnt(mval));
+
+//        XPRINTZ("ofs = %d; mval: 0x%X; pos: %d; val: 0x%X; N: %d; dif: %d",
+//                ofs, mval, pos, val, N, dif);
+
+        if(dif <= 0) {
+            val = mval;
+        } else {
+            N = dif;
+            pos += ofs;
+            val >>= ofs;
+        }
+    }
+    XPRINTZ("last N = %d; lastVAL; %d", N, val);
+    return val == 1 && N == 1 ? pos+1 : 0;
+}
+
 void GPU_interpolator::run() {
 
     using DataInterp = DataInterpolator<InputReal, OutputReal>;
@@ -314,6 +347,13 @@ void GPU_interpolator::run() {
             numDataSigs = 1;
     const float stepX = 1, stepY = 1,
           innerRad = 3, outerRad = 5;
+
+//    uint32_t num = 0x55555555;
+//    for(int N = 1; N <= 32; N++) {
+//        XPRINTZ("number: 0x%X; pocnt: %d; %d-th bitpos: %d", num, popcnt(num), N,
+//            getNthBitPos(num, N));
+//    }
+//    return;
 
     DataInterp::Params p = {
         nCols,
