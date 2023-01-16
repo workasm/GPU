@@ -319,7 +319,8 @@ uint32_t popcnt(uint32_t val) {
 uint32_t getNthBitPos(uint32_t val, uint32_t N) {
 
     uint32_t pos = 0;
-    for(uint32_t ofs = 16; ofs != 0; ofs /= 2) {
+    for(uint32_t ofs = 16; ofs != 0; ofs /= 2)
+    {
         auto mval = val & ((1 << ofs)-1);
         auto dif = (int)(N - popcnt(mval));
 
