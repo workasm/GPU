@@ -39,6 +39,15 @@ __device__ double divApprox(double a, double b) {
     return res;
 }
 
+// extracts bitfield from src of length 'width' starting at startIdx
+__device__ __forceinline__ uint32_t bfe(uint32_t src, uint32_t startIdx, uint32_t width)
+{
+    uint32_t bit;
+    asm volatile("bfe.u32 %0, %1, %2, %3;" : "=r"(bit) : "r"(src), "r"(startIdx), "r"(width));
+    return bit;
+}
+
+
 template <class G>
 __device__ __inline__ uint32_t get_peers(G key) {
 
@@ -161,44 +170,15 @@ __device__ __inline__ void reduce_peers(G key, uint32_t thX)
     }
     printf("%d: key: %d; key2: %d; which: %d; unclaimed: %X\n",
            lane, key, key2, which, unclaimed);
-
-    return;
 #endif
-    // normally you would have (key1, val1) and (key2, val2) for each thread
-    // then comes new one (key, val) and we need to add them to already existing elements
 }
-
-#if 0
-// 0-based position of the Nth LSB set
-uint32_t getNthBitPos(uint32_t val, uint32_t N) {
-
-    uint32_t pos = 0;
-    for(uint32_t ofs = 16; ofs != 0; ofs /= 2) {
-        auto mval = val & ((1 << ofs)-1);
-        auto dif = (int)(N - popcnt(mval));
-
-//        XPRINTZ("ofs = %d; mval: 0x%X; pos: %d; val: 0x%X; N: %d; dif: %d",
-//                ofs, mval, pos, val, N, dif);
-
-        if(dif <= 0) {
-            val = mval;
-        } else {
-            N = dif;
-            pos += ofs;
-            val >>= ofs;
-        }
-    }
-    XPRINTZ("last N = %d; lastVAL; %d", N, val);
-    return val == 1 && N == 1 ? pos+1 : 0;
-}
-#endif
 
 __device__ __inline__ void sorted_seq_histogram()
 {
     uint32_t tid = threadIdx.x, lane = tid % 32;
     uint32_t val = (lane + 117)* 23 / 97; // sorted sequence of values to be reduced
 
-    printf("%d: val = %d\n", lane, val);
+    PRINTZ("%d: val = %d", lane, val);
     uint32_t num = 1;
 
     const uint32_t allmsk = 0xffffffffu, shfl_c = 31;
@@ -206,19 +186,19 @@ __device__ __inline__ void sorted_seq_histogram()
     // shfl.sync wraps around: so thread 0 gets the value of thread 31
     bool leader = val != __shfl_sync(allmsk, val, lane - 1);
     auto OK = __ballot_sync(allmsk, leader); // find delimiter threads
-    auto total = __popc(OK); // the total number of unique numbers found
     uint32_t pos = 0, N = lane+1; // each thread searches Nth bit set in 'OK' (1-indexed)
 
-    for(int i = 1, j = 16; i <= 16; i *= 2, j /= 2) {
+    for(int i = 1; i <= 16; i *= 2) {
 
-        uint32_t mval = OK & ((1 << j)-1);
-        auto dif = (int)(N - __popc(mval));
-        if(dif <= 0) {
-            OK = mval;
-        } else {
-            N = dif, pos += j, OK >>= j;
+        uint32_t j = 16 / i;
+        //uint32_t mval = bfe(OK, pos, j); // extract j bits starting at pos from OK
+        uint32_t mval = (OK >> pos) & ((1 << j) - 1);
+        auto dif = N - __popc(mval);
+        if((int)dif > 0) {
+            N = dif, pos += j;
         }
-#if 1
+
+#if 0
         uint32_t xval = __shfl_down_sync(allmsk, val, i),
                  xnum = __shfl_down_sync(allmsk, num, i);
         if(lane + i < 32) {
@@ -240,14 +220,14 @@ __device__ __inline__ void sorted_seq_histogram()
     }
     num = __shfl_sync(allmsk, num, pos); // read from pos-th thread
     val = __shfl_sync(allmsk, val, pos); // read from pos-th thread
+
+    auto total = __popc(OK); // the total number of unique numbers found
     if(lane >= total) {
         num = 0xDEADBABE;
     }
-
-    //printf("%d: val = %d; num = %d; total: %d; idx = %d; leader: %d; pos: %d\n", lane, val, num, total, idx, leader, pos+1);
-    printf("%d: final val = %d; num = %d; \n", lane, val, num);
-//    if(num + val)
-//        __syncthreads();
+    PRINTZ("%d: final val = %d; num = %d", lane, val, num);
+    if(num + val == 1233123)
+        __syncthreads();
 }
 
 /*
@@ -439,7 +419,7 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
     // merged to: 22xx3333xx44444xx555x6x7x
     //
 
-    printf("%d: original sA: %d; sC: %d\n", lane, A, C);
+    PRINTZ("%d: original sA: %d; sC: %d", lane, A, C);
 
     // addrA, valA, addrC, valC
     uint32_t allmsk = 0xffffffffu;
@@ -453,7 +433,7 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
     uint32_t revA = __shfl_sync(allmsk, A, 31 - lane);
     uint32_t sC = max(C, revA);
 
-    printf("%d: bitonic sA: %d; sC: %d\n", lane, sA, sC);
+    PRINTZ("%d: bitonic sA: %d; sC: %d", lane, sA, sC);
 
     // bitonic sort sA and sC sequences
     for(int N = 16; N > 0; N /= 2) {
@@ -469,7 +449,7 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
             sC = min(sC, xC);
         }
     }
-    printf("%d: sorted sA: %d; sC: %d\n", lane, sA, sC);
+    PRINTZ("%d: sorted sA: %d; sC: %d", lane, sA, sC);
     union W {
         struct {
             uint32_t x, y;
@@ -482,17 +462,16 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
 
     // 0123 45 6789A BCD - thid
     // 0000 11 22222 333 - val
-    // 0001 01 00001 001 - ballot
+    // 1000 10 10000 100 - ballot
     // thread[i] takes the index of the ith non-zero bit
-
-    uint32_t idx = lane - 1;
-    // NOTE: these two sync commands can be merged with the first step of
-    // reduction algorithm
-    auto xA = __shfl_sync(allmsk, wA.x, idx);
-    auto xC = __shfl_sync(allmsk, wC.x, idx);
 
     uint32_t OK[2], pos[2], Num[2];
     {
+        uint32_t idx = lane - 1;
+        // NOTE: these two sync commands can be merged with the first step of
+        // reduction algorithm
+        auto xA = __shfl_sync(allmsk, wA.x, idx);
+        auto xC = __shfl_sync(allmsk, wC.x, idx);
         // if(leaderC != 0) => need to flash leaderC, i.e. write it to mem
         bool leader[2];
         leader[0] = wA.x != xA;
@@ -508,21 +487,51 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
     // the very elements of each group contain the sum
     for(int i = 1; i <= 16; i *= 2) { // for extreme case we also need i == 32
 
-        uint32_t j = 16 / i, flag = (1 << j) - 1;
+        uint32_t j = 16 / i;
         for(int k = 0; k < 2; k++) {
-            uint32_t mval = OK[k] & flag;
+            uint32_t mval = bfe(OK[k], pos[k], j); // extract j bits starting at pos[k] from OK[k]
             auto dif = Num[k] - __popc(mval);
-            if((int)dif <= 0) {
-                OK[k] = mval;
-            } else {
-                Num[k] = dif, pos[k] += j, OK[k] >>= j;
+            if((int)dif > 0) {
+                Num[k] = dif, pos[k] += j;
             }
         }
 
+        // FEDC BA98 7654 3210
+        // 0010 1101 0011 1000
+        // 6th bit set = 12
+
+        // 1. N = 6, pos = 0
+        // mask = 0xff
+        // popc = 3, N >= popc
+
+        // 2. N = 3, pos += 8
+        // OK = 0010 1101
+
         W pA, pC;
         uint32_t idx = lane + i;
-        pA.v = __shfl_sync(allmsk, wA.v, idx);
+        // we do not need wrap around for pA: hence could use predicate
+        pA.v = __shfl_down_sync(allmsk, wA.v, i);
         pC.v = __shfl_sync(allmsk, wC.v, idx);
+
+//        asm(R"({
+//          .reg .u32 r0,r1;
+//          .reg .pred p;
+//          shfl.sync.down.b32 r0|p, %1, %2, %3, %4;
+//          shfl.sync.down.b32 r1|p, %0, %2, %3, %4;
+//          @p setp.eq.s32 p, %1, r0;
+//          @p add.u32 r1, r1, %0;
+//          @p mov.u32 %0, r1;
+//        })"
+//        : "+r"(num) : "r"(val), "r"(i), "r"(shfl_c), "r"(allmsk));
+
+#if 1
+        W sel;
+        sel.v = (idx < 32 ? pA.v : pC.v);
+        if(wA.x == sel.x)
+            wA.y += sel.y;
+        if(idx < 32 && wC.x == pC.x)
+            wC.y += pC.y;
+#else
         if(idx < 32) {
             if(wA.x == pA.x)
                 wA.y += pA.y;
@@ -532,22 +541,29 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
             if(wA.x == pC.x)
                 wA.y += pC.y;
         }
+#endif
     }
     // finally merge wA and wC
-    PRINTZ("%d; valA: %d; numA: %d; valC: %d; numC: %d;",
+    PRINTZ("%d; final valA: %d; numA: %d; valC: %d; numC: %d;",
            lane, wA.x, wA.y, wC.x, wC.y);
 
     wA.v = __shfl_sync(allmsk, wA.v, pos[0]); // read from pos-th thread
     wC.v = __shfl_sync(allmsk, wC.v, pos[1]); // read from pos-th thread
-    if(OK[0] == 0) { // this indicates that the N-th thread did not find the N-th bit set
-        wA.y = 0xDEADBABE;
+
+    auto total = __popc(OK[0]);
+    if(lane >= total) { // this indicates that the N-th thread did not find the N-th bit set
+        wA.y = 0;
     }
-    if(OK[1] == 0) {
-        wC.y = 0xDEADBABE;
+    total = __popc(OK[1]);
+    if(lane >= total) { //this no longer works if OK does not change
+        wC.y = 0;
     }
 
-    PRINTZ("%d posA: %d; OK: %d val/numA: %d / %d", lane, pos[0], OK[0], wA.x, wA.y);
-    PRINTZ("%d posC: %d; OK: %d val/numC: %d / %d", lane, pos[1], OK[1], wC.x, wC.y);
+    PRINTZ("%d posA: %d; val/num: %d / %d; posC: %d; val/num: %d / %d",
+           lane, pos[0], wA.x, wA.y, pos[1], wC.x, wC.y);
+
+    if(wA.y + wC.y == 111111)
+        __syncthreads();
 }
 
 
@@ -575,7 +591,6 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
 
     if(bidx == 0 && thX < 32) {
         merge_seqs16(thX);
-        //reduce_peers(0, thX);
     }
     return;
 
