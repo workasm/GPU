@@ -17,7 +17,7 @@ namespace cg = cooperative_groups;
 #include "playground_host.h"
 #include "common_types.h"
 
-#if 1
+#if 0
 #define PRINTZ(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define PRINTZ(fmt, ...)
@@ -230,6 +230,13 @@ __device__ __inline__ void sorted_seq_histogram()
         __syncthreads();
 }
 
+union Payload {
+    struct {
+        float num, denom;
+    };
+    uint64_t v;
+};
+
 /*
 now we have [A; B] and [C; D] where D = +infty
 AB compare with revD, revC
@@ -394,16 +401,24 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
 }
 
 
-// merges 32-word sorted sequence A with 16-word sorted sequence C (for halfwarp)
-__device__ __inline__ void merge_seqs16(uint32_t thX)
+// merges 32-word sorted sequence A with 16-word sorted sequence B (for halfwarp)
+__device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& dataA,
+                                        uint32_t B, const Payload& dataB*/)
 {
     constexpr uint32_t bogus = 0x1000000; // special bogus value
-    uint32_t lane = thX,
-             A = lane * 27 / 57,
-             C = lane * 77 / 57;
+    uint32_t A = lane * 27 / 57;             // base address A (sorted)
+    Payload dataA, dataB;
+    dataA.num = (float)lane + 12;   // payload for A
+    dataA.denom = 1.0f / dataA.num;
 
-    if(thX >= 16)
-        C = bogus-1;  // this values shall be ignored..
+    uint32_t B = lane * 77 / 111;            // address B (to be merged with A)
+    dataB.num = (float)lane + 17;
+    dataB.denom = 1.0f / dataB.num;
+//    if(lane >= 16)
+//        C = bogus;  // this values shall be ignored..
+
+    // indexing into payload data: to save on shuffles
+    uint32_t idxA = lane, idxB = lane + 32;
 
     // 33334455556667
     // 10001010001001 - ballot
@@ -419,37 +434,24 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
     // merged to: 22xx3333xx44444xx555x6x7x
     //
 
-    PRINTZ("%d: original sA: %d; sC: %d", lane, A, C);
+    PRINTZ("%d: original sA: %d; sB: %d", lane, A, B);
 
-    // addrA, valA, addrC, valC
-    uint32_t allmsk = 0xffffffffu;
+    const uint32_t allmsk = 0xffffffffu, idx = 31 - lane;
 
-    uint32_t revC = __shfl_sync(allmsk, C, 31 - lane);
-    uint32_t sA = min(A, revC);
-    if(A != sA) {
-        // the hole is moved..
+    uint32_t revB = __shfl_sync(allmsk, B, idx);
+    uint32_t sA = A, sB = B;
+    if(revB < A) { // min(revB, A)
+        sA = revB;
+        idxA = 31 + 32 - lane; // revIdxB = shfl(idxB, 31 - lane)
     }
 
-    uint32_t revA = __shfl_sync(allmsk, A, 31 - lane);
-    uint32_t sC = max(C, revA);
-
-    PRINTZ("%d: bitonic sA: %d; sC: %d", lane, sA, sC);
-
-    // bitonic sort sA and sC sequences
-    for(int N = 16; N > 0; N /= 2) {
-
-        auto xA = __shfl_xor_sync(allmsk, sA, N);
-        auto xC = __shfl_xor_sync(allmsk, sC, N);
-
-        if(thX & N) {
-            sA = max(sA, xA);
-            sC = max(sC, xC);
-        } else {
-            sA = min(sA, xA);
-            sC = min(sC, xC);
-        }
+    uint32_t revA = __shfl_sync(allmsk, A, idx);
+    if(revA > B) { // max(B, revA);
+        sB = revA;
+        idxB = idx; // revIdxA = 31 - lane
     }
-    PRINTZ("%d: sorted sA: %d; sC: %d", lane, sA, sC);
+    PRINTZ("%d: bitonic sA: %d / %d; sB: %d / %d", lane, sA, idxA, sB, idxB);
+
     union W {
         struct {
             uint32_t x, y;
@@ -457,8 +459,48 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
         uint64_t v;
     };
 
-    W wA = { sA, 1 },
-      wC = { sC, 1 };
+    W wA = { sA, idxA },
+      wB = { sB, idxB };
+
+    // bitonic sort sA and sC sequences
+    for(int j = 4; j > 0; j--) {
+
+        W xA, xB;
+        uint32_t N = 1 << j;
+        xA.v = __shfl_xor_sync(allmsk, wA.v, N);
+        xB.v = __shfl_xor_sync(allmsk, wB.v, N);
+#if 0
+        uint32_t bit = bfe(lane, j, 1); // checks j-th bit
+        uint32_t dA = wA.x < xA.x, dB = wB.x < xB.x;
+        if(bit == dA)
+            wA = xA;
+        if(bit == dB)
+            wB = xB;
+#else
+        asm volatile(R"({
+          .reg .u32 bit,dA;
+          .reg .pred p, q;
+          and.b32 bit, %4, %5;
+          setp.eq.u32 q, bit, %5; // q = lane & N == N
+          setp.lt.xor.u32 p, %0, %6, q;  // p = wA.x < xA.x
+          @!p mov.u32 %0, %6; // if (p ^ q) == 0
+          @!p mov.u32 %1, %7;
+          setp.lt.xor.u32 p, %2, %8, q;  // p = wB.x < xB.x
+          @!p mov.u32 %2, %8; // if (p ^ q) == 0
+          @!p mov.u32 %3, %9;
+        })"
+        : "+r"(wA.x), "+r"(wA.y), "+r"(wB.x), "+r"(wB.y) : // 0, 1, 2, 3
+            "r"(lane), "r"(N),                             // 4, 5
+            "r"(xA.x), "r"(xA.y), "r"(xB.x), "r"(xB.y));   // 6, 7, 8, 9
+#endif
+    }
+    PRINTZ("%d: sorted sA: %d / %d; sB: %d / %d", lane, wA.x, wA.y, wB.x, wB.y);
+    if(wA.x+ wA.y+ wB.x+ wB.y == 991919)
+        __syncthreads();
+    return;
+
+    //wA.y = 1; // drop the indices for now for testing
+    //wB.y = 1;
 
     // 0123 45 6789A BCD - thid
     // 0000 11 22222 333 - val
@@ -471,13 +513,13 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
         // NOTE: these two sync commands can be merged with the first step of
         // reduction algorithm
         auto xA = __shfl_sync(allmsk, wA.x, idx);
-        auto xC = __shfl_sync(allmsk, wC.x, idx);
+        auto xB = __shfl_sync(allmsk, wB.x, idx);
         // if(leaderC != 0) => need to flash leaderC, i.e. write it to mem
         bool leader[2];
         leader[0] = wA.x != xA;
-        leader[1] = wC.x != (lane == 0 ? xA : xC);
+        leader[1] = wB.x != (lane == 0 ? xA : xB);
 
-        PRINTZ("%d leader: [%d: %d]", lane, leader[0], leader[1]);
+        //PRINTZ("%d leader: [%d: %d]", lane, leader[0], leader[1]);
         for(int k = 0; k < 2; k++) {
             OK[k] = __ballot_sync(allmsk, leader[k]); // find delimiter threads
             pos[k] = 0, Num[k] = lane + 1; // each thread searches Nth bit set in 'OK' (1-indexed)
@@ -507,11 +549,11 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
         // 2. N = 3, pos += 8
         // OK = 0010 1101
 
-        W pA, pC;
+        W pA, pB;
         uint32_t idx = lane + i;
         // we do not need wrap around for pA: hence could use predicate
         pA.v = __shfl_down_sync(allmsk, wA.v, i);
-        pC.v = __shfl_sync(allmsk, wC.v, idx);
+        pB.v = __shfl_sync(allmsk, wB.v, idx);
 
 //        asm(R"({
 //          .reg .u32 r0,r1;
@@ -526,11 +568,11 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
 
 #if 1
         W sel;
-        sel.v = (idx < 32 ? pA.v : pC.v);
+        sel.v = (idx < 32 ? pA.v : pB.v);
         if(wA.x == sel.x)
             wA.y += sel.y;
-        if(idx < 32 && wC.x == pC.x)
-            wC.y += pC.y;
+        if(idx < 32 && wB.x == pB.x)
+            wB.y += pB.y;
 #else
         if(idx < 32) {
             if(wA.x == pA.x)
@@ -544,11 +586,11 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
 #endif
     }
     // finally merge wA and wC
-    PRINTZ("%d; final valA: %d; numA: %d; valC: %d; numC: %d;",
-           lane, wA.x, wA.y, wC.x, wC.y);
+    PRINTZ("%d; final valA: %d; numA: %d; valB: %d; numB: %d;",
+           lane, wA.x, wA.y, wB.x, wB.y);
 
     wA.v = __shfl_sync(allmsk, wA.v, pos[0]); // read from pos-th thread
-    wC.v = __shfl_sync(allmsk, wC.v, pos[1]); // read from pos-th thread
+    wB.v = __shfl_sync(allmsk, wB.v, pos[1]); // read from pos-th thread
 
     auto total = __popc(OK[0]);
     if(lane >= total) { // this indicates that the N-th thread did not find the N-th bit set
@@ -556,13 +598,13 @@ __device__ __inline__ void merge_seqs16(uint32_t thX)
     }
     total = __popc(OK[1]);
     if(lane >= total) { //this no longer works if OK does not change
-        wC.y = 0;
+        wB.y = 0;
     }
 
-    PRINTZ("%d posA: %d; val/num: %d / %d; posC: %d; val/num: %d / %d",
-           lane, pos[0], wA.x, wA.y, pos[1], wC.x, wC.y);
+    PRINTZ("%d posA: %d; val/num: %d / %d; posB: %d; val/num: %d / %d",
+           lane, pos[0], wA.x, wA.y, pos[1], wB.x, wB.y);
 
-    if(wA.y + wC.y == 111111)
+    if(wA.y + wB.y == 111111)
         __syncthreads();
 }
 
