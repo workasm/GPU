@@ -17,7 +17,7 @@ namespace cg = cooperative_groups;
 #include "playground_host.h"
 #include "common_types.h"
 
-#if 0
+#if 1
 #define PRINTZ(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define PRINTZ(fmt, ...)
@@ -406,12 +406,12 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
                                         uint32_t B, const Payload& dataB*/)
 {
     constexpr uint32_t bogus = 0x1000000; // special bogus value
-    uint32_t A = lane * 27 / 57;             // base address A (sorted)
+    uint32_t A = 5 + lane * 27 / 57;             // base address A (sorted)
     Payload dataA, dataB;
-    dataA.num = (float)lane + 12;   // payload for A
+    dataA.num = -(float)lane - 12;   // payload for A
     dataA.denom = 1.0f / dataA.num;
 
-    uint32_t B = lane * 77 / 111;            // address B (to be merged with A)
+    uint32_t B = lane * 47 / 111;            // address B (to be merged with A)
     dataB.num = (float)lane + 17;
     dataB.denom = 1.0f / dataB.num;
 //    if(lane >= 16)
@@ -426,13 +426,6 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
 //    lt = (1 << lane)-1;
 //    idx = __fss(ballot & lt);
 //    for each leader thread, idx gives the location where it should be written
-    // 3xxx4x5xxx6xx7 where holes are vacant elements..
-
-    //            456778999 merge with 44668888xxx
-    // merge with 22333444455 -> locally reduce to 2x3xx4xxx5x
-
-    // merged to: 22xx3333xx44444xx555x6x7x
-    //
 
     PRINTZ("%d: original sA: %d; sB: %d", lane, A, B);
 
@@ -450,7 +443,6 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
         sB = revA;
         idxB = idx; // revIdxA = 31 - lane
     }
-    PRINTZ("%d: bitonic sA: %d / %d; sB: %d / %d", lane, sA, idxA, sB, idxB);
 
     union W {
         struct {
@@ -459,11 +451,15 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
         uint64_t v;
     };
 
+    // so the question: do we really need to sort all this ???
+
     W wA = { sA, idxA },
       wB = { sB, idxB };
 
     // bitonic sort sA and sC sequences
-    for(int j = 4; j > 0; j--) {
+    for(int j = 4; j >= 0; j--) {
+
+//        PRINTZ("%d / %d: half-sorted sA: %d / %d; sB: %d / %d", j, lane, wA.x, wA.y, wB.x, wB.y);
 
         W xA, xB;
         uint32_t N = 1 << j;
@@ -472,20 +468,23 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
 #if 0
         uint32_t bit = bfe(lane, j, 1); // checks j-th bit
         uint32_t dA = wA.x < xA.x, dB = wB.x < xB.x;
-        if(bit == dA)
+        if(bit == dA && wA.x != xA.x) // do not do anything on move
             wA = xA;
-        if(bit == dB)
+        if(bit == dB && wB.x != xB.x)
             wB = xB;
 #else
         asm volatile(R"({
           .reg .u32 bit,dA;
-          .reg .pred p, q;
+          .reg .pred p, q, r;
           and.b32 bit, %4, %5;
           setp.eq.u32 q, bit, %5; // q = lane & N == N
-          setp.lt.xor.u32 p, %0, %6, q;  // p = wA.x < xA.x
+            // is it possible to enforce swap when wA == xA for all cases ??
+          setp.lt.xor.u32 p, %0, %6, q;  // p = wA.x < xA.x XOR q
+          setp.eq.or.u32 p, %0, %6, p;   // p = wA.x == xA.x OR p
           @!p mov.u32 %0, %6; // if (p ^ q) == 0
           @!p mov.u32 %1, %7;
           setp.lt.xor.u32 p, %2, %8, q;  // p = wB.x < xB.x
+          setp.eq.or.u32 p, %2, %8, p;   // p = wB.x == xB.x OR p
           @!p mov.u32 %2, %8; // if (p ^ q) == 0
           @!p mov.u32 %3, %9;
         })"
@@ -493,14 +492,33 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
             "r"(lane), "r"(N),                             // 4, 5
             "r"(xA.x), "r"(xA.y), "r"(xB.x), "r"(xB.y));   // 6, 7, 8, 9
 #endif
-    }
-    PRINTZ("%d: sorted sA: %d / %d; sB: %d / %d", lane, wA.x, wA.y, wB.x, wB.y);
-    if(wA.x+ wA.y+ wB.x+ wB.y == 991919)
-        __syncthreads();
-    return;
 
-    //wA.y = 1; // drop the indices for now for testing
-    //wB.y = 1;
+    }
+    // idx: 0 1 32 37 3 4 41 42 44 6 7
+#if 0
+    {
+        PRINTZ("%d: sorted sA: %d / %d; sB: %d / %d; payload: %f / %f",
+               lane, wA.x, wA.y, wB.x, wB.y, dataA.num, dataB.num);
+
+        Payload xA, xAc, xB, xBc;
+        xA.v = __shfl_sync(allmsk, dataA.v, wA.y);
+        xAc.v = __shfl_sync(allmsk, dataB.v, wA.y - 32);
+        xB.v = __shfl_sync(allmsk, dataB.v, wB.y - 32);
+        xBc.v = __shfl_sync(allmsk, dataA.v, wB.y);
+        dataA.v = (wA.y < 32 ? xA.v : xAc.v);
+        dataB.v = (wB.y >= 32 ? xB.v : xBc.v);
+        PRINTZ("%d: sorted payload: %f / %f",
+               lane, dataA.num, dataB.num);
+    }
+#endif
+//    if(wA.x+ wA.y+ wB.x+ wB.y == 991919)
+//        __syncthreads();
+    //return;
+
+    // NOTE: here we should really reduce data !!!
+    // i.e. take indices and load data using wA/B.y
+    wA.y = 1; // drop the indices for now for testing
+    wB.y = 1;
 
     // 0123 45 6789A BCD - thid
     // 0000 11 22222 333 - val
@@ -519,7 +537,6 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
         leader[0] = wA.x != xA;
         leader[1] = wB.x != (lane == 0 ? xA : xB);
 
-        //PRINTZ("%d leader: [%d: %d]", lane, leader[0], leader[1]);
         for(int k = 0; k < 2; k++) {
             OK[k] = __ballot_sync(allmsk, leader[k]); // find delimiter threads
             pos[k] = 0, Num[k] = lane + 1; // each thread searches Nth bit set in 'OK' (1-indexed)
@@ -541,14 +558,6 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
         // FEDC BA98 7654 3210
         // 0010 1101 0011 1000
         // 6th bit set = 12
-
-        // 1. N = 6, pos = 0
-        // mask = 0xff
-        // popc = 3, N >= popc
-
-        // 2. N = 3, pos += 8
-        // OK = 0010 1101
-
         W pA, pB;
         uint32_t idx = lane + i;
         // we do not need wrap around for pA: hence could use predicate
