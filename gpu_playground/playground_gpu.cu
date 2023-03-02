@@ -32,10 +32,6 @@ __device__ uint32_t shuffle_up(uint32_t val, uint32_t delta, const uint32_t mask
       "  mov.u32 %0, r0;"
       "}"
       : "=r"(val) : "r"(input), "r"(delta), "r"(shfl_c), "r"(mask));
-
-    //        auto newv = __shfl_up_sync(mask, val, delta);
-    //        if(warp.thread_rank() >= delta)
-    //            val += newv;
     return val;
 }
 
@@ -103,7 +99,7 @@ bool GPU_reduce::launchKernel(size_t dataSz)
 
     constexpr uint32_t nThreads = 256;
     dim3 threads(nThreads, 1);
-    size_t shm_size = 16;
+    uint32_t shm_size = 16;
     dim3 grid((dataSz + nThreads - 1)/nThreads, 1);
 
     XPRINTZ("grid: (%d;%d), threads: (%d;%d); shm_size: %zd words",
@@ -117,20 +113,11 @@ bool GPU_reduce::launchKernel(size_t dataSz)
     warp_vote_kernel<nThreads><<< grid, threads >>>(
                 devIn, devOut, dataSz);
 
-    CU_END_TIMING(ms)
+    CU_END_TIMING(WarpVote)
     XPRINTZ("--- time elapsed: %.3f ms", ms);
 
     return true;
 }
-
-//struct DeviceMatrix {
-//    Real *data;
-//    uint32_t w, h, stride;
-//    __device__ Real get(int32_t x, int32_t y) const {
-//        return data[x + y * stride];
-//    }
-//};
-
 // returns (i;j)-th submatrix
 __device__ DeviceMatrix getBlock(const DeviceMatrix M, uint32_t x, uint32_t y)
 {
@@ -143,7 +130,6 @@ __device__ DeviceMatrix getBlock(const DeviceMatrix M, uint32_t x, uint32_t y)
 // threadIdx.xyz : thread index within a block
 
 // block size TILE_SZ x TILE_SZ
-#if 1
 template < uint32_t TILE_SZ >
 CUMP_LAUNCH_BOUNDS(256, 8)
 __global__ void mat_mul_kernel(const DeviceMatrix A, const DeviceMatrix B, float *devC)
@@ -182,71 +168,10 @@ __global__ void mat_mul_kernel(const DeviceMatrix A, const DeviceMatrix B, float
         devC[row * B.stride + col] = sum;
 #endif
 }
-#else
-
-template < uint32_t TILE_SZ >
-CUMP_LAUNCH_BOUNDS(256, 8)
-__global__ void mat_mul_kernel(const DeviceMatrix A,
-                               const DeviceMatrix B,
-                               Real *devC) {
-
-    // [wA x hA] * [wB x hB] = [B.w; A.h] and A.w == B.h
-
-    //auto g = this_thread_block();
-
-    extern __shared__ Real shared[];
-    // cx: [0..wB], cy: [0..hA]
-    const uint32_t thX = threadIdx.x, thY = threadIdx.y,
-             bx = TILE_SZ, by = TILE_SZ,
-             thid = thY * bx + thX,
-             bidx_x = blockIdx.x, bidx_y = blockIdx.y;
-
-    const uint32_t col = bidx_x * TILE_SZ + thX,
-                   row = bidx_y * TILE_SZ + thY;
-
-    auto shA = (Real *)shared, shB = shA + bx*by;
-
-    // one thread block processes one horizontal stripe of A and one vertical stripe of B
-    Real sum = 0;
-    for(uint32_t pos = 0; pos < A.w; pos += TILE_SZ) {
-
-        auto subA = getBlock(A, pos, bidx_y*TILE_SZ),
-             subB = getBlock(B, bidx_x*TILE_SZ, pos);
-
-        //Asub.data = &A.data[TILE_SZ*(A.stride * row + col)];
-        //A.stride * bidx_y * TILE_SZ + i*TILE_SZ
-
-        bool Aok = pos + thX < A.w && row < A.h,
-             Bok = col < B.w && pos + thY < B.h;
-
-        if(Aok)
-            shA[thid] = subA.get(thX, thY);
-
-        if(Bok)
-            shB[thid] = subB.get(thX, thY);
-
-        CU_SYNC
-
-        uint32_t num = min(TILE_SZ, A.w - pos);
-        for(uint32_t e = 0; e < num; e++) {
-
-            Real valA = shA[e + thY*TILE_SZ], // shA of size TILE_SZ x TILE_SZ
-                 valB = shB[thX + e*TILE_SZ];
-            sum += valA * valB;
-        }
-        CU_SYNC
-    }
-    auto ofs = row * B.stride + col;
-    if(ofs < A.h * B.stride)
-        devC[ofs] = sum;
-
-   // CUPRINTZ("%d %d -- %d", X, Y, Y * B.stride + X);
-}
-#endif
 
 bool GPU_matrixMul::launchKernel()
 {
-    auto szA = m_A.size(), szB = m_B.size(),
+    uint32_t szA = m_A.size(), szB = m_B.size(),
          szC = m_C.size();
 
     // we can also write here CPU_pinned_mem_ptr
@@ -279,9 +204,8 @@ bool GPU_matrixMul::launchKernel()
                 DeviceMatrix{devB, (uint32_t)m_B.width(), (uint32_t)m_B.height(), (uint32_t)m_B.stepT()},
                 devC);
 
-    CU_END_TIMING("MatMul")
+    CU_END_TIMING(MatMul)
 
     //cudaMemcpy(R, devR, mem_size_out, cudaMemcpyDeviceToHost);
     return true;
 }
-

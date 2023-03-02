@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <chrono>
+#include <random>
 
 #include "playground_host.h"
 #include "interpolate_host.h"
@@ -76,7 +77,7 @@ void GPU_playground::alloc_device_mem() {
             XPRINTZ("ERROR: unable to allocate device mem..");
             exit(1);
         }
-        XPRINTZ("Allocated %u bytes of device memory", dev_mem_size * word_size);
+        XPRINTZ("Allocated %zu bytes of device memory", dev_mem_size * word_size);
     }
 
     if(pinned_mem_size != 0) {// allocates device-mapped memory
@@ -88,7 +89,7 @@ void GPU_playground::alloc_device_mem() {
               CPU_pinned_mem_ptr, 0));
 
         // CPU_pinned_mem_ptr == DEV_pinned_mem_ptr for 64 bits
-        XPRINTZ("Allocated %u bytes of pinned device memory",
+        XPRINTZ("Allocated %zu bytes of pinned device memory",
                 pinned_mem_size * word_size);
     }
 
@@ -105,7 +106,7 @@ void GPU_playground::alloc_device_mem() {
             XPRINTZ("ERROR: unable to allocate CPU mem..");
             exit(1);
         }
-        XPRINTZ("Allocated %u bytes of page-locked host memory", CPU_mem_size * word_size);
+        XPRINTZ("Allocated %zu bytes of page-locked host memory", CPU_mem_size * word_size);
     }
 }
 
@@ -392,7 +393,7 @@ void GPU_interpolator::run() {
     // internal device buffer for collecting samples..
     dev_mem_size = p.w * p.h * p.numSignals * sizeof(DataInterp::Pix);
 
-    XPRINTZ("------- outImg total: %u", outImg.total());
+    XPRINTZ("------- outImg total: %zu", outImg.total());
 
     alloc_device_mem();
     m_devIn = (InputReal *)DEV_pinned_mem_ptr;
@@ -420,4 +421,64 @@ void GPU_interpolator::run() {
 //    disp.show(outImg);
 }
 
+// need vector type for memory allocations..
 
+// algorithm to setting
+void GPU_radixSort::run()
+{
+
+    word_size = 4;
+    // buffer size (in 32 bit words) where individual bits are to be set
+    const uint32_t dataSize = 128*1024*1024, // 4Gb bits
+          // number of indices defining which bits need to be set
+          indexSize = 32*1024*1024;          // 1Gb indices
+
+    dev_mem_size = dataSize + indexSize;    // this memory is only allocated on device side
+    pinned_mem_size = indexSize;
+
+    alloc_device_mem();
+
+    m_cpuOut.resize(dataSize, 0);
+
+    m_devOutBuf = (uint32_t *)DEV_mem_ptr;
+    m_devIndices = m_devOutBuf + dataSize;
+    m_cpuIndices = (uint32_t *)DEV_pinned_mem_ptr;
+
+    std::random_device rd; // this might be used to obtain seed
+    std::mt19937 gen(111);
+    std::uniform_int_distribution<uint32_t> uniform(0, (dataSize - 1)*32);
+
+    for(uint32_t i = 0; i < indexSize; i++) {
+        m_cpuIndices[i] = uniform(gen);
+    }
+
+    launchKernel(dataSize, indexSize);
+
+    uint32_t nfailed = 0;
+    for(uint32_t i = 0; i < indexSize && nfailed < 1000; i++) {
+        auto pos = m_cpuIndices[i] / 32, bit = m_cpuIndices[i] % 32,
+             flag = 1u << bit;
+
+        if(!(m_cpuOut[pos] & flag)) {
+            nfailed++;
+            XPRINTZ("%d: pos: %d; bit: %d wrong", nfailed, pos, bit);
+        }
+    }
+    if(nfailed == 0) {
+        for(uint32_t i = 0; i < indexSize; i++) {
+            auto pos = m_cpuIndices[i] / 32, bit = m_cpuIndices[i] % 32,
+                 flag = 1u << bit;
+            m_cpuOut[pos] &= ~flag; // reset all set bits to see if all are zeros
+        }
+
+        nfailed = 0;
+        for(uint32_t i = 0; i < indexSize && nfailed < 1000; i++) {
+            auto pos = m_cpuIndices[i] / 32;
+            if(m_cpuOut[pos] != 0) {
+                XPRINTZ("%d: is not zero: 0x%X", pos, m_cpuOut[pos]);
+                nfailed++;
+            }
+        }
+    }
+
+}

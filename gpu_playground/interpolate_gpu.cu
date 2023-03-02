@@ -47,132 +47,6 @@ __device__ __forceinline__ uint32_t bfe(uint32_t src, uint32_t startIdx, uint32_
     return bit;
 }
 
-
-template <class G>
-__device__ __inline__ uint32_t get_peers(G key) {
-
-    // warps.size() is the number of active threads in a warp participating in this call
-//    if(bidx == 0 && thX < 32) {
-//        printf("num_threads: %d; thread_rank: %d\n",
-//               warps.size(),warps.thread_rank());
-//    }
-    uint32_t peers = 0;
-    bool is_peer;
-
-#if 0
-    do {
-        auto warp = cg::coalesced_threads();
-        // fetch key of first unclaimed lane and compare with this key
-        is_peer = (key == warp.shfl(key, 0));
-
-        // determine which lanes had a match
-        peers = warp.ballot(is_peer);
-        // remove lanes with matching keys from the pool
-        //unclaimed ^= peers;
-
-        // quit if we had a match
-    } while (!is_peer);
-#else
-    // in the beginning, all lanes are available
-    uint32_t mask = 0xffffffffu, unclaimed = __activemask();
-    do {
-        // fetch key of first unclaimed lane and compare with this key
-        is_peer = (key == __shfl_sync(mask, key, __ffs(unclaimed) - 1));
-
-        // determine which lanes had a match
-        peers = __ballot_sync(mask, is_peer);
-
-        // remove lanes with matching keys from the pool
-        unclaimed ^= peers;
-
-        // quit if we had a match
-    } while (!is_peer);
-#endif
-    return peers;
-}
-
-
-template <class G>
-__device__ __inline__ void reduce_peers(G key, uint32_t thX)
-{
-//    1. reduce all peers to get 2 registers:
-//    key; val
-//    if key == 0xFFFFFFFF -> meaning that this one is free
-//    problem: merge 'key; val' with the next one 'key2;val2'
-//    where key and key2 should generally overlap well
-    auto lane = thX % 32;
-    key = thX % 5 + 1;
-
-//        idx & (1 << lane) is always true: the calling thread's bit is always set in idx
-
-//        upper_peer = the one after 'lane'
-//        lane = 4
-//        mask: 11110000: ignore all lanes lower
-//        threads: 0, 3, 4, 8
-//        peer = 0100011001
-//        // mask all uppper bits including myself
-//        my_pos = __popc(peer & ((1 << lane)-1))
-
-//        ((1<<lane)-1)
-//        lane=3: mask must be: 000000111
-//        lane=0: 1-1=0
-//        lane=1: (1<<1)-1 = 000000001
-
-    uint32_t val = 1;
-    auto peers = get_peers(key);
-    auto first = __ffs(peers) - 1; // only leading thread keeps the result
-    auto mypos = __popc(peers & ((1 << lane)-1));
-    auto mask = ~((1 << (lane + 1)) - 1);
-
-    printf("lane: %d; key: %X; peers: 0x%X; mypos: %d\n",
-           lane, key, peers, mypos);
-
-    peers &= mask;
-
-    uint32_t allmsk = 0xffffffffu;
-    while(__any_sync(allmsk, peers))
-    {
-        auto next = __ffs(peers);
-        auto t = __shfl_sync(allmsk, val, next-1);
-        if(next)
-            val += t;
-        bool done = mypos & 1;
-        auto which = __ballot_sync(allmsk, done); // every second thread is done since we are doing tree-like reduction
-        peers &= ~which; // remove those which are done
-        mypos >>= 1;
-    }
-    if(lane != first) {// if lane is not first in its group of peers, we can zero it out
-        val = 0, key = 0;
-    }
-
-    printf("lane: %d; key: %X; peers: 0x%X; mypos: %d; val: %d -- %d\n",
-           lane, key, peers, mypos, val, first);
-
-#if 1
-    auto key2 = thX % 7 + 1;
-
-    // bitmask of threads having non-empty keys
-    auto active = __ballot_sync(allmsk, key != 0); // lane == first
-    auto which = __ffs(active)-1;
-    bool is_peer = (key2 == __shfl_sync(allmsk, key, which));
-    peers = __ballot_sync(allmsk, is_peer);
-//    peers shows if any threads have key2 == key of 'which' thread
-    uint32_t unclaimed = allmsk;
-    unclaimed ^= peers;
-
-    printf("%d: key: %d; key2: %d; which: %d; peer: %X\n",
-           lane, key, key2, which, peers);
-
-    active &= ~(1 << which);
-    which = __ffs(active)-1;
-    if(!is_peer) {
-        // take second key...
-    }
-    printf("%d: key: %d; key2: %d; which: %d; unclaimed: %X\n",
-           lane, key, key2, which, unclaimed);
-#endif
-}
-
 __device__ __inline__ void sorted_seq_histogram()
 {
     uint32_t tid = threadIdx.x, lane = tid % 32;
@@ -208,12 +82,12 @@ __device__ __inline__ void sorted_seq_histogram()
 #else  // this is a (hopefully) optimized version of the code above
         asm(R"({
           .reg .u32 r0,r1;
-          .reg .pred p;
+          .reg .pred p, q;
           shfl.sync.down.b32 r0|p, %1, %2, %3, %4;
           shfl.sync.down.b32 r1|p, %0, %2, %3, %4;
-          @p setp.eq.s32 p, %1, r0;
-          @p add.u32 r1, r1, %0;
-          @p mov.u32 %0, r1;
+          setp.eq.and.s32 q, %1, r0, p;
+          @q add.u32 r1, r1, %0;
+          @q mov.u32 %0, r1;
         })"
         : "+r"(num) : "r"(val), "r"(i), "r"(shfl_c), "r"(allmsk));
 #endif
@@ -429,7 +303,7 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
 
     PRINTZ("%d: original sA: %d; sB: %d", lane, A, B);
 
-    const uint32_t allmsk = 0xffffffffu, idx = 31 - lane;
+    const uint32_t allmsk = 0xffffffffu, shfl_c = 31, idx = 31 - lane;
 
     uint32_t revB = __shfl_sync(allmsk, B, idx);
     uint32_t sA = A, sB = B;
@@ -483,7 +357,7 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
           setp.eq.or.u32 p, %0, %6, p;   // p = wA.x == xA.x OR p
           @!p mov.u32 %0, %6; // if (p ^ q) == 0
           @!p mov.u32 %1, %7;
-          setp.lt.xor.u32 p, %2, %8, q;  // p = wB.x < xB.x
+          setp.lt.xor.u32 p, %2, %8, q;  // p = wB.x < xB. XOR q
           setp.eq.or.u32 p, %2, %8, p;   // p = wB.x == xB.x OR p
           @!p mov.u32 %2, %8; // if (p ^ q) == 0
           @!p mov.u32 %3, %9;
@@ -558,31 +432,32 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
         // FEDC BA98 7654 3210
         // 0010 1101 0011 1000
         // 6th bit set = 12
-        W pA, pB;
         uint32_t idx = lane + i;
+#if 1
+        asm(R"({
+          .reg .u32 pAx,pAy,pBx,pBy,selx,sely;
+          .reg .pred p, q;
+          shfl.sync.down.b32 pAx|p, %2, %4, %6, %7;  // p = lane + i < 32
+          shfl.sync.down.b32 pAy|p, %0, %4, %6, %7;
+          shfl.sync.idx.b32 pBx, %3, %5, %6, %7;
+          shfl.sync.idx.b32 pBy, %1, %5, %6, %7;
+          selp.b32 selx, pAx, pBx, p;
+          selp.b32 sely, pAy, pBy, p;
+          setp.eq.u32 q, %2, selx;      // q = selx == wA.x
+          @q add.u32 sely, %0, sely;    // if(q) sely += wA.y
+          @q mov.u32 %0, sely;
+          setp.eq.and.u32 q, %3, pBx, p; // q = pBx == wB.x AND p
+          @q add.u32 pBy, %1, pBy;       // if(q) pBy += += wB.y
+          @q mov.u32 %1, pBy;
+        })"
+        : "+r"(wA.y), "+r"(wB.y) : "r"(wA.x), "r"(wB.x), // 0, 1, 2, 3
+           "r"(i), "r"(idx), "r"(shfl_c), "r"(allmsk)); // 4, 5, 6, 7
+
+#else
+        W pA, pB;
         // we do not need wrap around for pA: hence could use predicate
         pA.v = __shfl_down_sync(allmsk, wA.v, i);
         pB.v = __shfl_sync(allmsk, wB.v, idx);
-
-//        asm(R"({
-//          .reg .u32 r0,r1;
-//          .reg .pred p;
-//          shfl.sync.down.b32 r0|p, %1, %2, %3, %4;
-//          shfl.sync.down.b32 r1|p, %0, %2, %3, %4;
-//          @p setp.eq.s32 p, %1, r0;
-//          @p add.u32 r1, r1, %0;
-//          @p mov.u32 %0, r1;
-//        })"
-//        : "+r"(num) : "r"(val), "r"(i), "r"(shfl_c), "r"(allmsk));
-
-#if 1
-        W sel;
-        sel.v = (idx < 32 ? pA.v : pB.v);
-        if(wA.x == sel.x)
-            wA.y += sel.y;
-        if(idx < 32 && wB.x == pB.x)
-            wB.y += pB.y;
-#else
         if(idx < 32) {
             if(wA.x == pA.x)
                 wA.y += pA.y;
@@ -776,7 +651,7 @@ bool GPU_interpolator::launchKernel(const InterpParams< OutputReal >& p)
 //    size_t outSz = p.w * p.h * p.numSignals * sizeof(OutputReal);
 //    CU_CHECK_ERROR(cudaMemcpy(m_devOutCPU, devPixMem, std::min(dev_mem_size, outSz), cudaMemcpyDeviceToHost));
 
-    CU_END_TIMING("GPU interp")
+    CU_END_TIMING(GPUinterp)
     return true;
 }
 

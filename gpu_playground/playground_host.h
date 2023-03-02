@@ -157,4 +157,22 @@ protected:
     OutputReal *m_devOut = nullptr, *m_devOutCPU = nullptr;
 };
 
+struct GPU_radixSort : GPU_playground {
+
+    ~GPU_radixSort() override = default;
+
+    void run() override;
+
+protected:
+    bool launchKernel(size_t dataSz, size_t indexSz);
+
+    uint32_t *m_devOutBuf = nullptr,
+             *m_devIndices = nullptr,
+             *m_cpuIndices = nullptr;
+
+    std::vector< uint32_t > m_cpuOut;
+};
+
+int nBodySim(const int argc, const char** argv);
+
 #endif // GPU_PLAYGROUND_H

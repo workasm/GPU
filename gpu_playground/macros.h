@@ -1,19 +1,3 @@
-// ============================================================================
-//
-// Copyright (c) 2001-2008 Max-Planck-Institut Saarbruecken (Germany).
-// All rights reserved.
-//
-// this file is not part of any library ;-)
-//
-// ----------------------------------------------------------------------------
-//
-// Library       : CUDA MP
-//
-// File          : 
-//
-// Author(s)     : Pavel Emeliyanenko <asm@mpi-sb.mpg.de>
-//
-// ============================================================================
 
 #ifndef _MACROS_H_
 #define _MACROS_H_
@@ -138,7 +122,7 @@
     float ms = 0;                  \
     cudaEventElapsedTime( &ms, e_start, e_end ); \
     if(nIters > 0) ms /= nIters; \
-    fprintf(stderr, "%s time elapsed: %.3f ms", name, ms); \
+    fprintf(stderr, "%s time elapsed: %.3f ms..\n", #name, ms); \
     }
 
 #define FETCH_FROM_CUDA_ARRAY

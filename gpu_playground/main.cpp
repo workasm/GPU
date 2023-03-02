@@ -20,12 +20,16 @@
 
 int main(int argc, char** argv) try {
 
-    auto pobj = std::make_unique< GPU_interpolator >();
+    nBodySim(argc, (const char **)argv);
+    return 0;
+
+    //auto pobj = std::make_unique< GPU_interpolator >();
+    auto pobj = std::make_unique< GPU_radixSort >();
     pobj->run();
     return 0;
 }
 catch(std::exception& ex) {
-    fprintf(stderr, "Exception: %s", ex.what());
+    fprintf(stderr, "Exception: %s\n", ex.what());
 }
 catch(...) {
     fprintf(stderr, "Unknown exception");
