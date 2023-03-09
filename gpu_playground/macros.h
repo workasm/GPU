@@ -78,6 +78,8 @@
                 __FILE__, __LINE__, cudaGetErrorString(err) );               \
     }
 
+#define CU_CHECK_LAST   CU_CHECK_ERROR(cudaGetLastError())
+
 #define CU_SAVEn(addr, idx, ofs, a, _n) do { \
     for(unsigned _i = 0; _i < _n; _i++) { \
         (addr)[(idx) + _i * (ofs)] = (a)[_i]; \

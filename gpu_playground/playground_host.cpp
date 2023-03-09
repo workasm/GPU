@@ -426,59 +426,28 @@ void GPU_interpolator::run() {
 // algorithm to setting
 void GPU_radixSort::run()
 {
-
     word_size = 4;
-    // buffer size (in 32 bit words) where individual bits are to be set
-    const uint32_t dataSize = 128*1024*1024, // 4Gb bits
-          // number of indices defining which bits need to be set
-          indexSize = 32*1024*1024;          // 1Gb indices
-
-    dev_mem_size = dataSize + indexSize;    // this memory is only allocated on device side
-    pinned_mem_size = indexSize;
+    const uint32_t dataSize = 1024;
+    pinned_mem_size = dataSize;
 
     alloc_device_mem();
 
-    m_cpuOut.resize(dataSize, 0);
-
-    m_devOutBuf = (uint32_t *)DEV_mem_ptr;
-    m_devIndices = m_devOutBuf + dataSize;
-    m_cpuIndices = (uint32_t *)DEV_pinned_mem_ptr;
+    m_cpuOut.resize(dataSize);
+    m_pinnedData = (uint32_t *)DEV_pinned_mem_ptr;
 
     std::random_device rd; // this might be used to obtain seed
     std::mt19937 gen(111);
     std::uniform_int_distribution<uint32_t> uniform(0, (dataSize - 1)*32);
 
-    for(uint32_t i = 0; i < indexSize; i++) {
-        m_cpuIndices[i] = uniform(gen);
+    for(uint32_t i = 0; i < dataSize; i++) {
+        m_pinnedData[i] = 1;//uniform(gen);
     }
+    std::copy(m_pinnedData, m_pinnedData + dataSize, begin(m_cpuOut));
+   // std::sort(begin(m_cpuOut), end(m_cpuOut));
 
-    launchKernel(dataSize, indexSize);
+    launchKernel(dataSize);
 
-    uint32_t nfailed = 0;
-    for(uint32_t i = 0; i < indexSize && nfailed < 1000; i++) {
-        auto pos = m_cpuIndices[i] / 32, bit = m_cpuIndices[i] % 32,
-             flag = 1u << bit;
-
-        if(!(m_cpuOut[pos] & flag)) {
-            nfailed++;
-            XPRINTZ("%d: pos: %d; bit: %d wrong", nfailed, pos, bit);
-        }
-    }
-    if(nfailed == 0) {
-        for(uint32_t i = 0; i < indexSize; i++) {
-            auto pos = m_cpuIndices[i] / 32, bit = m_cpuIndices[i] % 32,
-                 flag = 1u << bit;
-            m_cpuOut[pos] &= ~flag; // reset all set bits to see if all are zeros
-        }
-
-        nfailed = 0;
-        for(uint32_t i = 0; i < indexSize && nfailed < 1000; i++) {
-            auto pos = m_cpuIndices[i] / 32;
-            if(m_cpuOut[pos] != 0) {
-                XPRINTZ("%d: is not zero: 0x%X", pos, m_cpuOut[pos]);
-                nfailed++;
-            }
-        }
-    }
-
+    bool print_if_differs = true;
+    checkme((const int32_t *)m_cpuOut.data(), (const int32_t *)m_pinnedData, dataSize, dataSize, 1,
+            0, print_if_differs, 1000);
 }

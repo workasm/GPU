@@ -20,8 +20,7 @@
 
 int main(int argc, char** argv) try {
 
-    nBodySim(argc, (const char **)argv);
-    return 0;
+//    nBodySim(argc, (const char **)argv);
 
     //auto pobj = std::make_unique< GPU_interpolator >();
     auto pobj = std::make_unique< GPU_radixSort >();

@@ -14,10 +14,11 @@
 // C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v10.1/include/
 #include <cooperative_groups.h>
 //#include <sm_30_intrinsics.hpp>
-using namespace cooperative_groups;
+namespace cg = cooperative_groups;
 
 #include "macros.h"
 #include "playground_host.h"
+#include "common_funcs.cu"
 
 #if 1
 #define PRINTZ(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
@@ -145,63 +146,48 @@ __device__ __inline__ void reduce_peers(G key, uint32_t thX)
 #endif
 }
 
-__global__ void set_bits_baseline(uint32_t N, const uint32_t *indices,
-                                uint32_t *outBuf)
+template < uint32_t BlockSz >
+__global__ void radixSortKernel(uint32_t *vals, uint32_t count)
 {
-    uint32_t thid = threadIdx.x;
-    uint32_t idx = thid + blockIdx.x * blockDim.x,
-            stride = blockDim.x * gridDim.x;
+    uint32_t thid = threadIdx.x, lane = thid % 32;
+    uint32_t idx = thid + blockIdx.x * BlockSz,
+            stride = BlockSz * gridDim.x;
 
-    for(; idx < N / 4; idx += stride) {
-        uint4 val = ((const uint4 *)indices)[idx];
+    auto cta = cg::this_thread_block();
+    //cg::coalesced_threads()
 
-        auto keyA = val.x / 32, bitA = val.x % 32,
-             keyB = val.y / 32, bitB = val.y % 32,
-             keyC = val.z / 32, bitC = val.z % 32,
-             keyD = val.w / 32, bitD = val.w % 32;
+    auto val = vals[idx];
+    auto res = prefixSum< BlockSz >(cta, val, [](uint32_t& lhs, const uint32_t& rhs)
+            { lhs += rhs; }
+    );
 
-        auto peerA = get_peers(keyA),
-             peerB = get_peers(keyB);
-
-        if(blockIdx.x == 0 && thid < 32) {
-            PRINTZ("%d: peers: %d / 0x%x and %d / 0x%x -- %d %d", thid, keyA, peerA, keyB, peerB, keyC, keyD);
-        }
-
-        atomicOr(outBuf + keyA, 1u << bitA);
-        atomicOr(outBuf + keyB, 1u << bitB);
-        atomicOr(outBuf + keyC, 1u << bitC);
-        atomicOr(outBuf + keyD, 1u << bitD);
-    }
+    vals[idx] = res;
 }
 
-bool GPU_radixSort::launchKernel(size_t dataSize, size_t indexSize)
+bool GPU_radixSort::launchKernel(size_t dataSize)
 {
+    constexpr uint32_t BlockSz = 128;
+    uint32_t nblocks = 1;
 
-    uint32_t nthreads = 128, nblocks = indexSize / (4*nthreads);
+    XPRINTZ("dataSize: %zu; #threads: %u; #blocks: %u",
+            dataSize, BlockSz, nblocks);
 
-    XPRINTZ("dataSize: %zu; indexSize: %zu; #threads: %u; #blocks: %u",
-            dataSize, indexSize, nthreads, nblocks);
+//    void *storage = nullptr;
+//    size_t bytesNeeded = 0;
+//    cub::DeviceRadixSort::SortKeys(nullptr, bytesNeeded, m_cpuIndices, m_devIndices, indexSize);
+    //XPRINTZ("CUB storage required: %zu", bytesNeeded);
+    //cudaMalloc(&storage, bytesNeeded);
 
-    void *storage = nullptr;
-    size_t bytesNeeded = 0;
-    cub::DeviceRadixSort::SortKeys(nullptr, bytesNeeded, m_cpuIndices, m_devIndices, indexSize);
-    XPRINTZ("CUB storage required: %zu", bytesNeeded);
-
-    cudaMalloc(&storage, bytesNeeded);
-
-    CU_BEGIN_TIMING(4)
+    CU_BEGIN_TIMING(0)
 
     //cudaMemcpy(m_devIndices, m_cpuIndices.data(), indexSize * word_size, cudaMemcpyHostToDevice);
-    cudaMemset(m_devOutBuf, 0, dataSize * word_size);
-
     //cub::DeviceRadixSort::SortKeys(storage, bytesNeeded, m_cpuIndices, m_devIndices, indexSize);
 
-    set_bits_baseline<<< nblocks, nthreads >>>(indexSize, m_devIndices, m_devOutBuf);
+    radixSortKernel< BlockSz ><<< nblocks, BlockSz >>>(m_pinnedData, dataSize);
 
-    cudaMemcpy(m_cpuOut.data(), m_devOutBuf, dataSize * word_size, cudaMemcpyDeviceToHost);
+    //cudaMemcpy(m_cpuOut.data(), m_devOutBuf, dataSize * word_size, cudaMemcpyDeviceToHost);
     CU_END_TIMING(SetBits)
-
-    cudaFree(storage);
+    //cudaFree(storage);
 
     return true;
 }

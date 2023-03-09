@@ -164,11 +164,9 @@ struct GPU_radixSort : GPU_playground {
     void run() override;
 
 protected:
-    bool launchKernel(size_t dataSz, size_t indexSz);
+    bool launchKernel(size_t dataSz);
 
-    uint32_t *m_devOutBuf = nullptr,
-             *m_devIndices = nullptr,
-             *m_cpuIndices = nullptr;
+    uint32_t *m_pinnedData = nullptr;
 
     std::vector< uint32_t > m_cpuOut;
 };

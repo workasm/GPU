@@ -30,7 +30,7 @@ include_directories(${CUDA_INCLUDE_DIRS})
 set(CUDA_NVCC_FLAGS "--ptxas-options;-v;-keep")
 
 cuda_select_nvcc_arch_flags(ARCH_FLAGS 3.5)
-list(APPEND CUDA_NVCC_FLAGS ${ARCH_FLAGS})
+list(APPEND CUDA_NVCC_FLAGS ${ARCH_FLAGS}  -Wno-deprecated-gpu-targets)
 
 # Set CUDA_ATTACH_VS_BUILD_RULE_TO_CUDA_FILE when you want to add the same .cu
 # file to multiple targets.
