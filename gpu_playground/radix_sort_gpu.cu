@@ -154,19 +154,48 @@ __global__ void radixSortKernel(uint32_t *vals, uint32_t count)
             stride = BlockSz * gridDim.x;
 
     auto cta = cg::this_thread_block();
-    //cg::coalesced_threads()
+
+    // 2 bit digits: 0..3 * 8
+    // 3 bit digits: 0..7 * 8
+    // 4 bit digits: 0..15 * 8 => 16 bytes
+    struct DigitsAcc {
+        uint32_t d[4]; // 4 words are enough to scan 4-bit digits
+    };
 
     auto val = vals[idx];
-    auto res = prefixSum< BlockSz >(cta, val, [](uint32_t& lhs, const uint32_t& rhs)
+    auto digit = (val % 4) * 8;
+
+    // digit 0 is accumulated in the 1st byte
+    // digit 1 in the 2nd byte, digit 2 in the 3rd part..
+    uint32_t pref = 1 << digit;
+
+    auto res = prefixSum< BlockSz >(cta, pref, [](auto& lhs, const auto& rhs)
             { lhs += rhs; }
     );
+
+    __shared__ uint32_t sh[BlockSz];
+    if(thid == BlockSz-1) {
+        // 8 | 3 | 10 | 5
+        // 3 |10 |  5 | 0
+        //10 | 5 |  0 | 0
+        // multiply by 0x1010100
+        sh[0] = (res << 8) + (res << 16) + (res << 24);
+    }
+    cg::sync(cta);
+
+    int ofs = (((res + sh[0]) >> digit) & 0xFF) - 1;
+    sh[ofs] = val;
+
+    cg::sync(cta);
+
+    PRINTZ("%d: val: %d; res: %d; pref: 0x%X; -- %d", thid, val, sh[thid], pref, ofs);
 
     vals[idx] = res;
 }
 
 bool GPU_radixSort::launchKernel(size_t dataSize)
 {
-    constexpr uint32_t BlockSz = 128;
+    constexpr uint32_t BlockSz = 64;
     uint32_t nblocks = 1;
 
     XPRINTZ("dataSize: %zu; #threads: %u; #blocks: %u",

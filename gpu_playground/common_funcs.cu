@@ -9,33 +9,48 @@ namespace cg = cooperative_groups;
 
 #include "macros.h"
 
+__device__ __forceinline__ float divApprox(float a, float b) {
+    float res;
+    asm volatile(R"( {
+        div.full.f32 %0, %1, %2;
+    })" : "=f"(res) : "f"(a), "f"(b));
+    return res;
+}
+
+__device__ __forceinline__ double divApprox(double a, double b) {
+    double res;
+    asm volatile(R"( {
+        div.rn.f64 %0, %1, %2;
+    })" : "=d"(res) : "d"(a), "d"(b));
+    return res;
+}
+
+// extracts bitfield from src of length 'width' starting at startIdx
+__device__ __forceinline__ uint32_t bfe(uint32_t src, uint32_t startIdx, uint32_t width)
+{
+    uint32_t bit;
+    asm volatile("bfe.u32 %0, %1, %2, %3;" : "=r"(bit) : "r"(src), "r"(startIdx), "r"(width));
+    return bit;
+}
 
 // compute prefix sum of data 'T' using reduce operation ReduceOp
 template < uint32_t BlockSz, class T, class ReduceOp >
 __device__ T prefixSum(cg::thread_block cta, const T& data, ReduceOp op)
 {
-    constexpr uint32_t warpSz = 32, allmsk = 0xffffffffu,
-              postScanSz = BlockSz / warpSz;
+    constexpr uint32_t warpSz = 32,postScanSz = BlockSz / warpSz;
     const uint32_t thid = threadIdx.x, lane = thid % warpSz;
 
     auto part = cg::tiled_partition<warpSz>(cta);
 
-    union UT {
-        enum { size = (sizeof(T) + 3)/4 };
-        T data;
-        uint32_t words[size];
-    };
-
-    __shared__ UT mem[postScanSz];
+    __shared__ T mem[postScanSz];
     //auto active = cg::coalesced_threads();
 
-    UT X = { data };
+    auto X = data;
     for(uint32_t delta = 1; delta < warpSz; delta *= 2) {
 
-        UT tmp;
-        tmp.data = part.shfl_up(X.data, delta);
+        auto tmp = part.shfl_up(X, delta);
         if(lane >= delta) {
-            op(X.data, tmp.data); // call our reduce operation
+            op(X, tmp); // call our reduce operation
         }
     }
 
@@ -45,35 +60,27 @@ __device__ T prefixSum(cg::thread_block cta, const T& data, ReduceOp op)
     }
     cg::sync(cta);
 
-    //  part.meta_group_rank(), part.thread_rank()
-    //printf("%d: data = %d; X.data = %d\n", thid, data, X.data);
-
     // only do this for the first warp
     if(part.meta_group_rank() == 0) {
 
-        auto X2 = part.thread_rank() < postScanSz ? mem[thid] : UT{};
-        for(uint32_t delta = 1; delta < postScanSz; delta *= 2) {
-
-            UT tmp;
-            tmp.data = part.shfl_up(X2.data, delta);
-
-//            for(uint32_t i = 0; i < UT::size; i++) {
-//                tmp.words[i] = __shfl_up_sync(allmsk, X2.words[i], delta, postScanSz);
-////                        part.shfl_up(X2.words[i], delta);
-//            }
+        bool cc = part.thread_rank() < postScanSz;
+        auto X2 = cc ? mem[thid] : T{};
+        for(uint32_t delta = 1; delta < postScanSz; delta *= 2)
+        {
+            auto tmp = part.shfl_up(X2, delta);
             if(lane >= delta) {
-                op(X2.data, tmp.data); // call our reduce operation
+                op(X2, tmp); // call our reduce operation
             }
         }
-        if(part.thread_rank() < postScanSz)
+        if(cc)
             mem[thid] = X2;
     }
     cg::sync(cta);
 
     auto warpID = part.meta_group_rank();
     if(warpID > 0) {
-        auto X2 = mem[warpID-1];
-        op(X.data, X2.data);
+        auto Xup = mem[warpID-1];
+        op(X, Xup);
     }
-    return X.data;
+    return X;
 }

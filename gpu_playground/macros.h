@@ -18,13 +18,9 @@
 
 #if CUMP_VERBOSE
 #define STILL_ALIVE printf("%d\n", __LINE__)
-#define CUMP_out(x) std::cerr << x
-#define CUMP_out2(fmt, ...) printf(fmt, ##__VA_ARGS__)
 #define XPRINTZ(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
 #else
 #define STILL_ALIVE
-#define CUMP_out(x)
-#define CUMP_out2(x, ...)
 #define XPRINTZ(fmt, ...)
 
 #endif

@@ -16,36 +16,13 @@ namespace cg = cooperative_groups;
 #include "macros.h"
 #include "playground_host.h"
 #include "common_types.h"
+#include "common_funcs.cu"
 
 #if 1
 #define PRINTZ(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define PRINTZ(fmt, ...)
 #endif
-
-__device__ float divApprox(float a, float b) {
-    float res;
-    asm volatile(R"( {
-        div.full.f32 %0, %1, %2;
-    })" : "=f"(res) : "f"(a), "f"(b));
-    return res;
-}
-
-__device__ double divApprox(double a, double b) {
-    double res;
-    asm volatile(R"( {
-        div.rn.f64 %0, %1, %2;
-    })" : "=d"(res) : "d"(a), "d"(b));
-    return res;
-}
-
-// extracts bitfield from src of length 'width' starting at startIdx
-__device__ __forceinline__ uint32_t bfe(uint32_t src, uint32_t startIdx, uint32_t width)
-{
-    uint32_t bit;
-    asm volatile("bfe.u32 %0, %1, %2, %3;" : "=r"(bit) : "r"(src), "r"(startIdx), "r"(width));
-    return bit;
-}
 
 __device__ __inline__ void sorted_seq_histogram()
 {
