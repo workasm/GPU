@@ -24,6 +24,9 @@ namespace cg = cooperative_groups;
 #define PRINTZ(fmt, ...)
 #endif
 
+// inline assembler wrapper
+// https://github.com/stasinek/stasm/blob/master/stk_stasm.h
+
 __device__ __inline__ void sorted_seq_histogram()
 {
     uint32_t tid = threadIdx.x, lane = tid % 32;
@@ -146,8 +149,8 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
 
     W V = { A, B };
     // bitonic sort sA, sB and C sequences..
-    for(int N = 16; N > 0; N /= 2)
-    {
+    for(int j = 4; j >= 0; j--) {
+        int N = 1 << j;
         W xV;
         auto xC = __shfl_xor_sync(allmsk, C, N);
         xV.v = __shfl_xor_sync(allmsk, V.v, N);
@@ -190,29 +193,25 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
         OK[k] = __ballot_sync(allmsk, leader[k]); // find delimiter threads
         pos[k] = 0, Num[k] = lane + 1; // each thread searches Nth bit set in 'OK' (1-indexed)
     }
-    //auto total = __popc(OK); // the total number of unique numbers found
 
-    for(int i = 1; i <= 16; i *= 2) {
+    // the very elements of each group contain the sum
+    for(int i = 1; i <= 16; i *= 2) { // for extreme case we also need i == 32
 
-        uint32_t j = 16 / i, flag = (1 << j) - 1;
+        uint32_t j = 16 / i;
         for(int k = 0; k < 3; k++) {
-            uint32_t mval = OK[k] & flag;
-            auto dif = (int)(Num[k] - __popc(mval));
-            if(dif <= 0) {
-                OK[k] = mval;
-            } else {
-                Num[k] = dif, pos[k] += j, OK[k] >>= j;
+            uint32_t mval = bfe(OK[k], pos[k], j); // extract j bits starting at pos[k] from OK[k]
+            auto dif = Num[k] - __popc(mval);
+            if((int)dif > 0) {
+                Num[k] = dif, pos[k] += j;
             }
         }
 
         W pA, pB, pC;
         uint32_t idx = lane + i;
-//        pA.v = __shfl_down_sync(allmsk, wA.v, i); // reads from thX + i, sets predicate!!
-        pA.v = __shfl_sync(allmsk, wA.v, idx); // this wraps around
+        // we do not need wrap around for pA: hence could use predicate
+        pA.v = __shfl_down_sync(allmsk, wA.v, i);
         pB.v = __shfl_sync(allmsk, wB.v, idx);
         pC.v = __shfl_sync(allmsk, wC.v, idx);
-//        auto selA = (idx < 32 ? pA : pB);
-//        auto selB = (idx < 32 ? pB : pC);
         if(idx < 32) {
             if(wA.x == pA.x)
                 wA.y += pA.y;
@@ -228,8 +227,9 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
         }
     }
     //        A    B    C
-    // val:   1122 2334 4455
+    // val:   1122 2334 4445
     // final: 1234 5xxx xxxx
+    // count: 2324 1
     // that is, leaders must be shifted left: B->A, C->B, otherwise we won't have enough space
 
     // pos[0] - gives thread locations to read from
@@ -239,13 +239,45 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     // at the end, 'leader' threads contain data, remaining threads contain garbage..
     // they will be tightly packed at the end:
 
-//    wA.v = __shfl_sync(allmsk, wA.v, pos); // read from pos-th thread
-//    if(lane >= total) {
-//        wA.y = 0xDEADBABE;
+    wA.v = __shfl_sync(allmsk, wA.v, pos[0]); // read from pos-th thread
+    wB.v = __shfl_sync(allmsk, wB.v, pos[1]); // read from pos-th thread
+    wC.v = __shfl_sync(allmsk, wC.v, pos[2]); // read from pos-th thread
+
+    //  sorted:  11112 22333 33444
+    //  leader:  10001 00100 00100
+//    vA = shfl(vA, pos[0]) - consolidate vA's
+//    if(lane >= total)
+//        vA = vB;
+
+//    vA: 2,5,9,x,x
+//    vB: A,C,F,x,x => shfl => F,x,x,A,C
+//    => merge => 2,5,9,A,C F,x,x,x,x
+
+    auto total = __popc(OK[0]);
+    // cyclic rotate wB by total to merge results with 'A'
+     wB.v = __shfl_sync(allmsk, wB.v, lane - total); // read from pos-th thread
+
+    if(lane >= total) { // this indicates that the N-th thread did not find the N-th bit set
+        wA = wB;
+        // get data from wB.v
+    }
+//    total = __popc(OK[1]);
+//    if(lane >= total) { //this no longer works if OK does not change
+//        wB.y = 0;
 //    }
-    PRINTZ("%d: final A = [%d; %d]; B = [%d; %d]; C = [%d; %d]", lane,
-           wA.x, wA.y, wB.x, wB.y, wC.x, wC.y);
-    PRINTZ("%d pos: %d %d %d", lane, pos[0], pos[1], pos[2]);
+//    total = __popc(OK[2]);
+//    if(lane >= total) { //this no longer works if OK does not change
+//        wC.y = 0;
+//    }
+
+    int tid = total, n = total+222;
+
+    PRINTZ("%d posA: %d; val/num: %d / %d; posB: %d; val/num: %d / %d; posC: %d val/num: %d / %d",
+           lane, pos[0], wA.x, wA.y, pos[1], wB.x, wB.y,
+            pos[2], wC.x, wC.y);
+
+    //PRINTZ("%d: final A = [%d; %d]; B = [%d; %d]; C = [%d; %d]", lane,
+      //     wA.x, wA.y, wB.x, wB.y, wC.x, wC.y);
 
     if(wA.y + wB.y + wC.y == 111111)
         __syncthreads();
@@ -493,7 +525,7 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
                outerRadSq = params.outerRadX * params.outerRadX;
 
     if(bidx == 0 && thX < 32) {
-        merge_seqs16(thX);
+        merge_seqs32(thX);
     }
     return;
 

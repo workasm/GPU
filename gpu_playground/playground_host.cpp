@@ -427,7 +427,7 @@ void GPU_interpolator::run() {
 void GPU_radixSort::run()
 {
     word_size = 4;
-    const uint32_t dataSize = 1024;
+    const uint32_t dataSize = 32;
     pinned_mem_size = dataSize;
 
     alloc_device_mem();
@@ -440,7 +440,7 @@ void GPU_radixSort::run()
     std::uniform_int_distribution<uint32_t> uniform(0, (dataSize - 1)*32);
 
     for(uint32_t i = 0; i < dataSize; i++) {
-        m_pinnedData[i] = 1;//uniform(gen);
+        m_pinnedData[i] = uniform(gen) % 16;
     }
     std::copy(m_pinnedData, m_pinnedData + dataSize, begin(m_cpuOut));
    // std::sort(begin(m_cpuOut), end(m_cpuOut));
