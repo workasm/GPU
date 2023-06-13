@@ -519,7 +519,7 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
 
     //extern __shared__ InputReal sh[];
 
-    const auto NaN = nanf(""),
+    const auto NaN = CUDART_NAN_F,
                eps = (OutputReal)1e-4,
                innerRadSq = params.innerRadX * params.innerRadX,
                outerRadSq = params.outerRadX * params.outerRadX;

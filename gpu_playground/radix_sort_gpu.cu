@@ -8,7 +8,7 @@
 #include <cub/cub.cuh>
 
 //#ifndef __CUDACC__
-#define __CUDACC__ 1
+//#define __CUDACC__ 1
 //#endif
 
 // C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v10.1/include/
