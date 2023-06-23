@@ -73,8 +73,8 @@ int main(int argc, char** argv) try {
     //const char *ss = XX(qwef,wefw,we,weff,ewf,ewfwef,fwe,f);
     //printf(ss);
 
-    //auto pobj = std::make_unique< GPU_interpolator >();
-    auto pobj = std::make_unique< GPU_radixSort >();
+    auto pobj = std::make_unique< GPU_interpolator >();
+    //auto pobj = std::make_unique< GPU_radixSort >();
     pobj->run();
     return 0;
 }

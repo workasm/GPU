@@ -112,8 +112,8 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     // 1. ofs - mem ofs where to store (in sorted order)
     // 2. num and denom - the data which we store (this could be taken as 64-bit value???)
 
-    const uint32_t lane = thX % 32;
-    uint32_t A = lane * 33 / 129,
+    const int32_t lane = thX % 32;
+    uint32_t A = lane * 33/129,/*253 / 129,*/
              B = (lane + 32) * 33 / 129, // [A,B] has no duplicates
              C = (lane + 7) * 37 / 119;
 
@@ -186,7 +186,7 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     leader[2] = wC.x != (lane == 0 ? xB : xC);
 
     // if(leaderC != 0) => need to flash leaderC, i.e. write it to mem
-    PRINTZ("%d leader: [%d: %d; %d]", lane, leader[0], leader[1], leader[2]);
+    //PRINTZ("%d leader: [%d: %d; %d]", lane, leader[0], leader[1], leader[2]);
 
     uint32_t OK[3], pos[3], Num[3];
     for(int k = 0; k < 3; k++) {
@@ -253,24 +253,65 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
 //    vB: A,C,F,x,x => shfl => F,x,x,A,C
 //    => merge => 2,5,9,A,C F,x,x,x,x
 
-    auto total = __popc(OK[0]);
+    // total cannot be 0 since we have at least some data in A
+    int32_t total = __popc(OK[0]);
     // cyclic rotate wB by total to merge results with 'A'
      wB.v = __shfl_sync(allmsk, wB.v, lane - total); // read from pos-th thread
 
     if(lane >= total) { // this indicates that the N-th thread did not find the N-th bit set
         wA = wB;
-        // get data from wB.v
     }
-//    total = __popc(OK[1]);
-//    if(lane >= total) { //this no longer works if OK does not change
-//        wB.y = 0;
-//    }
-//    total = __popc(OK[2]);
-//    if(lane >= total) { //this no longer works if OK does not change
-//        wC.y = 0;
-//    }
+    // valid data left in B is: (32 - totalA) - totalB
+    int32_t numB = __popc(OK[1]), numC = __popc(OK[2]);
+    total += numB;
+    int32_t leftA = total - 32;
 
-    int tid = total, n = total+222;
+    // suppose totalA = 4, totalB = 5
+    // leftA = 5 - (32 - 4) = 5 - 28 = -23 - this is amount of free space left in 'A' if negative
+
+    // suppose totalA = 14, totalB = 25
+    // leftA = 25 - (32 - 14) = 25 - 18 = 7
+
+    if(leftA < 0) { // we still have some free space in A to move C into
+        if(lane == 0)
+            PRINTZ("taking wA <- wC branch");
+
+        // cyclic rotate wC to merge with wB
+        wC.v = __shfl_sync(allmsk, wC.v, lane - total); // read from pos-th thread
+        if(lane >= total) {
+            wA = wC;
+        }
+        wB = wC; // move rest of wC into wB if any
+
+        total += numC;
+        int32_t leftC = 32 - total;
+
+        if(lane >= total) // probably not necessary but good for debugging
+            wA = {};
+
+        //PRINTZ("numA = %d; numB = %d; numC = %d, leftC = %d", __popc(OK[0]), numB, numC, leftC);
+
+        // if leftC < 0 => some elements of wC are left in wB
+        if(lane >= -leftC) {
+            wB = {};
+        }
+        wC = {}; // in this case C will be completely moved to B
+
+    // no space left in A to move C => move C into B
+    } else {
+        if(lane == 0)
+            PRINTZ("taking wA <- wB <- wC branch");
+
+        wC.v = __shfl_sync(allmsk, wC.v, lane - numB); // read from pos-th thread
+        if(lane >= numB) { // this indicates that the N-th thread did not find the N-th bit set
+            wB = wC;
+        }
+
+        int32_t leftC = numB + numC - 32;
+        if(lane >= leftC) {
+            wC = {};
+        }
+    }
 
     PRINTZ("%d posA: %d; val/num: %d / %d; posB: %d; val/num: %d / %d; posC: %d val/num: %d / %d",
            lane, pos[0], wA.x, wA.y, pos[1], wB.x, wB.y,
@@ -281,6 +322,14 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
 
     if(wA.y + wB.y + wC.y == 111111)
         __syncthreads();
+
+    // suppose warp sz = 4
+    //                    A    B    C
+    // [A,B,C] is sorted: 1111 1334 4445
+    // should pack it as: 1345 xxxx xxxx
+    //            counts: 5241 0000 0000
+
+    // [A,B] - holds quantity, C - is added to it
 }
 
 

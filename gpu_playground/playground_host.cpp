@@ -441,7 +441,7 @@ void GPU_radixSort::run()
 
     uint32_t ssum = 0;
     for(uint32_t i = 0; i < dataSize; i++) {
-        m_pinnedData[i] = 1;//uniform(gen) % 16;
+        m_pinnedData[i] = uniform(gen) % 256;
         ssum += m_pinnedData[i];
         m_cpuOut[i] = ssum;
     }
