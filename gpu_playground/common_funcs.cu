@@ -37,7 +37,7 @@ __device__ __forceinline__ uint32_t bfe(uint32_t src, uint32_t startIdx, uint32_
 template < uint32_t BlockSz, class T, class ReduceOp >
 __device__ T prefixSum(cg::thread_block cta, const T& data, ReduceOp op)
 {
-    constexpr uint32_t warpSz = 32,postScanSz = BlockSz / warpSz;
+    constexpr uint32_t warpSz = 32, postScanSz = BlockSz / warpSz;
     const uint32_t thid = threadIdx.x, lane = thid % warpSz;
 
     auto part = cg::tiled_partition<warpSz>(cta);

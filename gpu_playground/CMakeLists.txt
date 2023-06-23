@@ -6,7 +6,9 @@
 cmake_minimum_required(VERSION 3.12)
 
 project(gpu_playground)
-include(clang_cuda_compile.cmake)
+
+#include(clang_cuda_compile.cmake)
+include(x_cuda_compile.cmake)
 
 #set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_VERBOSE_MAKEFILE ON)
@@ -31,21 +33,14 @@ include_directories(${CUDA_INCLUDE_DIRS})
 
 # set(CUDA_NVCC_FLAGS "--compiler-options;-mtune=core2;-mfpmath=sse")
 #set(CUDA_NVCC_FLAGS "--ptxas-options;--maxrregcount=128;")
-#set(CUDA_NVCC_FLAGS "--ptxas-options;-v;-keep;-allow-unsupported-compiler;-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
-# this will pass '-v' option to ptxas assembler
-set(CUDA_NVCC_FLAGS "-Xcuda-ptxas;-v;-Xcuda-ptxas;--opt-level=3;-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+set(CUDA_NVCC_FLAGS "--ptxas-options;-v;-keep;-allow-unsupported-compiler;-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
 
-#cuda_select_nvcc_arch_flags(ARCH_FLAGS 3.5)
-#list(APPEND CUDA_NVCC_FLAGS ${ARCH_FLAGS} -Wno-deprecated-gpu-targets)
+# clang this will pass '-v' option to ptxas assembler
+#set(CUDA_NVCC_FLAGS "-Xcuda-ptxas;-v;-Xcuda-ptxas;--opt-level=3;-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+#set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -DNDEBUG -D_DLL -Xclang --dependent-lib=msvcrt -D_MD")
 
-# Set CUDA_ATTACH_VS_BUILD_RULE_TO_CUDA_FILE when you want to add the same .cu
-# file to multiple targets.
-#set(CUDA_PROPAGATE_HOST_FLAGS OFF)
-#set(CUDA_ATTACH_VS_BUILD_RULE_TO_CUDA_FILE OFF)
-#set(CUDA_VERBOSE_BUILD ON)
-
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -DNDEBUG -D_DLL -Xclang --dependent-lib=msvcrt -D_MD")
-message(STATUS "-- flags: ${CMAKE_CXX_FLAGS} xxxx ${CMAKE_CXX_FLAGS_RELEASE} xxx ${CMAKE_CXX_FLAGS_RELEASE_INIT}")
+cuda_select_nvcc_arch_flags(ARCH_FLAGS 3.5)
+list(APPEND CUDA_NVCC_FLAGS ${ARCH_FLAGS} -Wno-deprecated-gpu-targets)
 
 x_cuda_compile(CUDA_FILES ${CU})
 #cuda_compile_cubin(CUBIN_FILES ${CU})

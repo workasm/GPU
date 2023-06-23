@@ -230,10 +230,81 @@ __global__ void radixSortKernel(uint32_t *vals, uint32_t count)
     //vals[idx] = res;
 }
 
+__device__ uint32_t g_blockCounter = 0;
+
+// single-pass grid scan
+template < uint32_t BlockSz >
+__global__ void globalScanKernel(uint32_t *scanVals, uint32_t *scanTops, uint32_t count)
+{
+    const uint32_t s_SignalVal = 0xDEADBABE;
+    uint32_t thid = threadIdx.x, lane = thid % 32, bidx = blockIdx.x;
+    uint32_t idx = thid + bidx * BlockSz,
+            stride = BlockSz * gridDim.x;
+
+    auto reduceOp = [](auto& lhs, const auto& rhs) {
+        lhs += rhs;
+    };
+
+    __shared__ bool amLast;
+    auto cta = cg::this_thread_block();
+
+    //for(; idx < count; idx += stride) {
+        auto A = scanVals[idx];
+        auto res = prefixSum< BlockSz >(cta, A, reduceOp);
+        //PRINTZ("%d: %d", thid, res);
+    //}
+    // let each thread
+    if(thid == BlockSz-1) { // data size must be block-aligned
+        scanTops[bidx] = res;
+
+        __threadfence();
+
+        // the last param gives the maxima val
+        auto inc = atomicInc(&g_blockCounter, gridDim.x);
+        PRINTZ("%d incrementing", inc);
+        amLast = (inc == gridDim.x - 1);
+    }
+    cg::sync(cta);
+    if(amLast) {
+
+        if(thid == 0)
+        PRINTZ("%d Im last", bidx);
+        // g_blockCounter equals  gridDim.x now!
+
+        auto val = thid < gridDim.x ? scanTops[thid] : 0;
+        auto resTop = prefixSum< BlockSz >(cta, val, reduceOp);
+        if(thid < gridDim.x)
+            scanTops[thid] = resTop;
+
+        __threadfence();
+
+        // increment once more to signal other blocks that data is ready
+        if(thid == 0)
+            g_blockCounter = s_SignalVal;
+
+    } else {
+        if(thid == 0) {
+            auto& g_mutex = (volatile uint32_t&)g_blockCounter;
+            while(g_mutex != s_SignalVal);
+        }
+        cg::sync(cta);
+//        if(thid == 0) {
+//            PRINTZ("block: %d; read tops: %d %d %d %d", blockIdx.x,
+//                   scanTops[0], scanTops[1], scanTops[2], scanTops[3]);
+//        }
+    }
+    if(bidx > 0) {
+        auto top = scanTops[bidx-1];
+        reduceOp(res, top);
+    }
+    //PRINTZ("%d: %d", idx, res);
+    scanVals[idx] = res;
+}
+
 bool GPU_radixSort::launchKernel(size_t dataSize)
 {
-    constexpr uint32_t BlockSz = 32;
-    uint32_t nblocks = 1;
+    constexpr uint32_t BlockSz = 128;
+    uint32_t nblocks = (dataSize + BlockSz-1) / BlockSz;
 
     XPRINTZ("dataSize: %zu; #threads: %u; #blocks: %u",
             dataSize, BlockSz, nblocks);
@@ -242,18 +313,31 @@ bool GPU_radixSort::launchKernel(size_t dataSize)
 //    size_t bytesNeeded = 0;
 //    cub::DeviceRadixSort::SortKeys(nullptr, bytesNeeded, m_cpuIndices, m_devIndices, indexSize);
     //XPRINTZ("CUB storage required: %zu", bytesNeeded);
-    //cudaMalloc(&storage, bytesNeeded);
+
+    uint32_t *blockTops = nullptr;
+    cudaMalloc(&blockTops, nblocks);
+
+    uint32_t retCnt = 0;
+    cudaMemcpyToSymbol(g_blockCounter, &retCnt, sizeof(uint32_t), 0,
+                              cudaMemcpyHostToDevice);
 
     CU_BEGIN_TIMING(0)
 
     //cudaMemcpy(m_devIndices, m_cpuIndices.data(), indexSize * word_size, cudaMemcpyHostToDevice);
     //cub::DeviceRadixSort::SortKeys(storage, bytesNeeded, m_cpuIndices, m_devIndices, indexSize);
 
-    radixSortKernel< BlockSz ><<< nblocks, BlockSz >>>(m_pinnedData, dataSize);
+    globalScanKernel< BlockSz ><<< nblocks, BlockSz >>>(m_pinnedData, blockTops, dataSize);
+
+    auto err = cudaGetLastError();
+    XPRINTZ("cuda last error: %d -- %s", err, cudaGetErrorString(err));
+    //radixSortKernel< BlockSz ><<< nblocks, BlockSz >>>(m_pinnedData, dataSize);
 
     //cudaMemcpy(m_cpuOut.data(), m_devOutBuf, dataSize * word_size, cudaMemcpyDeviceToHost);
     CU_END_TIMING(SetBits)
-    //cudaFree(storage);
+
+    cudaThreadSynchronize();
+
+    cudaFree(blockTops);
 
     return true;
 }
