@@ -113,9 +113,9 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     // 2. num and denom - the data which we store (this could be taken as 64-bit value???)
 
     const int32_t lane = thX % 32;
-    uint32_t A = lane * 33/129,/*253 / 129,*/
-             B = (lane + 32) * 33 / 129, // [A,B] has no duplicates
-             C = (lane + 7) * 37 / 119;
+    uint32_t A = lane * 100/129,/*253 / 129,*/
+             B = (lane + 32) * 100 / 129, // [A,B] has no duplicates
+             C = (lane + 7) * 137 / 119;
 
     // NOTE that A and B are already compressed: i.e.,
     // [A,B] is a sorted sequence without duplicates
@@ -245,10 +245,6 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
 
     //  sorted:  11112 22333 33444
     //  leader:  10001 00100 00100
-//    vA = shfl(vA, pos[0]) - consolidate vA's
-//    if(lane >= total)
-//        vA = vB;
-
 //    vA: 2,5,9,x,x
 //    vB: A,C,F,x,x => shfl => F,x,x,A,C
 //    => merge => 2,5,9,A,C F,x,x,x,x
@@ -264,15 +260,11 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     // valid data left in B is: (32 - totalA) - totalB
     int32_t numB = __popc(OK[1]), numC = __popc(OK[2]);
     total += numB;
-    int32_t leftA = total - 32;
 
-    // suppose totalA = 4, totalB = 5
-    // leftA = 5 - (32 - 4) = 5 - 28 = -23 - this is amount of free space left in 'A' if negative
+    if(lane == 0)
+        PRINTZ("numA = %d; numB = %d; numC = %d", __popc(OK[0]), numB, numC);
 
-    // suppose totalA = 14, totalB = 25
-    // leftA = 25 - (32 - 14) = 25 - 18 = 7
-
-    if(leftA < 0) { // we still have some free space in A to move C into
+    if(total < 32) { // we still have some free space in A to move C into
         if(lane == 0)
             PRINTZ("taking wA <- wC branch");
 
@@ -284,13 +276,10 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
         wB = wC; // move rest of wC into wB if any
 
         total += numC;
-        int32_t leftC = 32 - total;
-
         if(lane >= total) // probably not necessary but good for debugging
             wA = {};
 
-        //PRINTZ("numA = %d; numB = %d; numC = %d, leftC = %d", __popc(OK[0]), numB, numC, leftC);
-
+        int32_t leftC = 32 - total;
         // if leftC < 0 => some elements of wC are left in wB
         if(lane >= -leftC) {
             wB = {};
@@ -302,12 +291,26 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
         if(lane == 0)
             PRINTZ("taking wA <- wB <- wC branch");
 
-        wC.v = __shfl_sync(allmsk, wC.v, lane - numB); // read from pos-th thread
-        if(lane >= numB) { // this indicates that the N-th thread did not find the N-th bit set
+        int32_t spaceB = 32 - total; // indicated how much is occupied in B
+        wC.v = __shfl_sync(allmsk, wC.v, lane - spaceB); // read from pos-th thread
+        if(lane >= spaceB) { // this indicates that the N-th thread did not find the N-th bit set
             wB = wC;
         }
+        total += numC;
+        int32_t leftB = total - 32; // amount of elements left free in B
 
-        int32_t leftC = numB + numC - 32;
+        if(lane == 0)
+            PRINTZ("leftB = %d", leftB);
+
+        if(lane >= 64 - total) {
+            wB = {};
+        }
+
+        ///
+        int32_t leftC = total - 64; // amount of elements left free in C
+        //! if(leftC > 0) => this indicated overflow !! i.e. the histogram is full, it must be uploaded
+
+        // this is probably a wrong condition!!
         if(lane >= leftC) {
             wC = {};
         }
