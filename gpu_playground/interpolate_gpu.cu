@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <math.h>
+#include <tuple>
 
 #include <cuda_runtime_api.h>
 
@@ -103,6 +104,98 @@ sD = max(D, revA) = D
 so, we have [sA; sB] and sC
  */
 
+union W {
+    struct {
+        uint32_t x, y;
+    };
+    uint64_t v;
+};
+
+// first we reduce C: i.e., remove duplicates and shrink C
+// we assume that C is SORTED (with possible duplicates)!!
+template < class NT >
+__device__ __inline__ NT reduce_C(uint32_t lane, NT wC)
+{
+    const uint32_t allmsk = 0xffffffffu, shfl_c = 31;
+
+    auto xC = __shfl_sync(allmsk, wC.x, lane - 1);
+    bool leader = wC.x != xC;
+
+    uint32_t OK = __ballot_sync(allmsk, leader),
+        pos = 0, Num = lane + 1; // each thread searches Nth bit set in 'OK' (1-indexed)
+
+    // the very elements of each group contain the sum
+    for(int i = 1; i <= 16; i *= 2) { // for extreme case we also need i == 32
+
+        uint32_t j = 16 / i;
+        uint32_t mval = bfe(OK, pos, j); // extract j bits starting at pos[k] from OK[k]
+        auto dif = Num - __popc(mval);
+        if((int)dif > 0) {
+            Num = dif, pos += j;
+        }
+
+        int32_t pred = 0;
+        auto pC = shflDownPred(wC, i, pred);
+        if(pred && wC.x == pC.x) {
+            wC.y += pC.y;
+        }
+    }
+
+    wC = shflType< stSync >(wC, pos); // read from pos-th thread
+    // total cannot be 0 since we have at least some data in A
+    uint32_t total = __popc(OK);
+    if(lane >= total)
+        wC = {};
+
+    return wC;
+}
+
+template < class NT >
+__device__ __inline__ NT bitonicSort(uint32_t lane, NT V)
+{
+    for(int j = 4; j >= 0; j--) {
+        int N = 1 << j;
+
+        // idx = lane ^ N
+        auto X = shflType< stXor >(key, N);
+        auto set = (lane & N) == N;
+        set ^= (V < X);
+        set = set | (V == X);
+        if(set == 0) {
+            V = X;
+        }
+    }
+
+    return V;
+#if 0
+        uint32_t bit = bfe(lane, j, 1); // checks j-th bit
+        uint32_t dA = wA.x < xA.x, dB = wB.x < xB.x;
+        if(bit == dA && wA.x != xA.x) // do not do anything on move
+            wA = xA;
+        if(bit == dB && wB.x != xB.x)
+            wB = xB;
+#elif 0
+        asm volatile(R"({
+          .reg .u32 bit,dA;
+          .reg .pred p, q, r;
+          and.b32 bit, %4, %5;
+          setp.eq.u32 q, bit, %5; // q = lane & N == N
+            // is it possible to enforce swap when wA == xA for all cases ??
+          setp.lt.xor.u32 p, %0, %6, q;  // p = wA.x < xA.x XOR q
+          setp.eq.or.u32 p, %0, %6, p;   // p = wA.x == xA.x OR p
+          @!p mov.u32 %0, %6; // if (p ^ q) == 0
+          @!p mov.u32 %1, %7;
+          setp.lt.xor.u32 p, %2, %8, q;  // p = wB.x < xB. XOR q
+          setp.eq.or.u32 p, %2, %8, p;   // p = wB.x == xB.x OR p
+          @!p mov.u32 %2, %8; // if (p ^ q) == 0
+          @!p mov.u32 %3, %9;
+        })"
+        : "+r"(wA.x), "+r"(wA.y), "+r"(wB.x), "+r"(wB.y) : // 0, 1, 2, 3
+            "r"(lane), "r"(N),                             // 4, 5
+            "r"(xA.x), "r"(xA.y), "r"(xB.x), "r"(xB.y));   // 6, 7, 8, 9
+#endif
+}
+
 __device__ __inline__ void merge_seqs32(uint32_t thX)
 {
     // we are given: per-thread mem offset
@@ -115,11 +208,7 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     const int32_t lane = thX % 32;
     uint32_t A = lane * 100/129,/*253 / 129,*/
              B = (lane + 32) * 100 / 129, // [A,B] has no duplicates
-             C = (lane + 7) * 137 / 119;
-
-    // NOTE that A and B are already compressed: i.e.,
-    // [A,B] is a sorted sequence without duplicates
-    // C also has no duplicates ??
+             C = (lane + 7) * 137 / 1119;
 
     // we have two sorted seqs [A;B] and C
     const uint32_t allmsk = 0xffffffffu, shfl_c = 31;
@@ -128,7 +217,15 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     uint32_t revB = __shfl_sync(allmsk, B, 31 - lane);
     uint32_t sC = max(C, revB);
 
-    PRINTZ("orig: %d; A: %d; B: %d; C: %d", lane, A, B, C);
+    //PRINTZ("orig: %d; A: %d; B: %d; C: %d", lane, A, B, C);
+//    {
+//        W wC = {C, 1};
+//        auto xC = reduce_C(lane, wC);
+//        if(xC.x + xC.y == 9999999)
+//            __threadfence();
+//        PRINTZ("%d: C: %d/%d", lane, xC.x, xC.y);
+//        return;
+//    }
 
     // we have 2 bitonic sequences now: [sA; sB] and sC
     // first bitonic sort step of [sA and sB] -> need
@@ -140,13 +237,8 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     // that is, [A, B, C] is partially sorted
     PRINTZ("bitonic: %d; sA: %d; sB: %d; sC: %d", lane, A, B, C);
 
-    union W {
-        struct {
-            uint32_t x, y;
-        };
-        uint64_t v;
-    };
 
+    // TODO: we need generic warp sort with payload
     W V = { A, B };
     // bitonic sort sA, sB and C sequences..
     for(int j = 4; j >= 0; j--) {
@@ -164,13 +256,60 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
             V.y = min(V.y, xV.y);
             C = min(C, xC);
         }
+#if 0
+        uint32_t bit = bfe(lane, j, 1); // checks j-th bit
+        uint32_t dA = wA.x < xA.x, dB = wB.x < xB.x;
+        if(bit == dA && wA.x != xA.x) // do not do anything on move
+            wA = xA;
+        if(bit == dB && wB.x != xB.x)
+            wB = xB;
+#elif 0
+        asm volatile(R"({
+          .reg .u32 bit,dA;
+          .reg .pred p, q, r;
+          and.b32 bit, %4, %5;
+          setp.eq.u32 q, bit, %5; // q = lane & N == N
+            // is it possible to enforce swap when wA == xA for all cases ??
+          setp.lt.xor.u32 p, %0, %6, q;  // p = wA.x < xA.x XOR q
+          setp.eq.or.u32 p, %0, %6, p;   // p = wA.x == xA.x OR p
+          @!p mov.u32 %0, %6; // if (p ^ q) == 0
+          @!p mov.u32 %1, %7;
+          setp.lt.xor.u32 p, %2, %8, q;  // p = wB.x < xB. XOR q
+          setp.eq.or.u32 p, %2, %8, p;   // p = wB.x == xB.x OR p
+          @!p mov.u32 %2, %8; // if (p ^ q) == 0
+          @!p mov.u32 %3, %9;
+        })"
+        : "+r"(wA.x), "+r"(wA.y), "+r"(wB.x), "+r"(wB.y) : // 0, 1, 2, 3
+            "r"(lane), "r"(N),                             // 4, 5
+            "r"(xA.x), "r"(xA.y), "r"(xB.x), "r"(xB.y));   // 6, 7, 8, 9
+#endif
+
     }
     PRINTZ("sorted: %d; sA: %d; sB: %d; sC: %d", lane, V.x, V.y, C);
 
+    // question is: can we live with fragmented values ??
+
     // leader is the lowest thread with equal val
-    //  sorted:  11112223333344
-    //  leader:  10001001000010
-    //  idx:     0123456789ABCD
+    // sorted: 1123344567 (at most one dup is possible)
+    // leader: 1011010111
+    //  idx:   0123456789
+    //  we need to find the nth bit set in leader
+    // pos[] = {0,2,3,5,7,8,9} - positions of set bits
+    // we need:
+    // lane 0: idx = 0
+    // lane 1: idx = 2
+    // lane 2: idx = 3
+    // lane 3: idx = 5
+    // we have it other way round:
+    // lane 0: idx = 0
+    // lane 2: idx = 1
+    // lane 3: idx = 2
+    // lane 5: idx = 3
+
+    // yes, these threads can read 'idx'
+
+    // set bit 'i' : at position [i; 2*i]
+    // 11, 011, 101, 011
 
     W wA = { V.x, 1 };
     W wB = { V.y, 1 };
@@ -320,9 +459,6 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
            lane, pos[0], wA.x, wA.y, pos[1], wB.x, wB.y,
             pos[2], wC.x, wC.y);
 
-    //PRINTZ("%d: final A = [%d; %d]; B = [%d; %d]; C = [%d; %d]", lane,
-      //     wA.x, wA.y, wB.x, wB.y, wC.x, wC.y);
-
     if(wA.y + wB.y + wC.y == 111111)
         __syncthreads();
 
@@ -378,14 +514,6 @@ __device__ __inline__ void merge_seqs16(uint32_t lane/*, uint32_t A, Payload& da
         sB = revA;
         idxB = idx; // revIdxA = 31 - lane
     }
-
-    union W {
-        struct {
-            uint32_t x, y;
-        };
-        uint64_t v;
-    };
-
     // so the question: do we really need to sort all this ???
 
     W wA = { sA, idxA },
