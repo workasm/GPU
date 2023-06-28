@@ -33,7 +33,7 @@ include_directories(${CUDA_INCLUDE_DIRS})
 
 # set(CUDA_NVCC_FLAGS "--compiler-options;-mtune=core2;-mfpmath=sse")
 #set(CUDA_NVCC_FLAGS "--ptxas-options;--maxrregcount=128;")
-set(CUDA_NVCC_FLAGS "--ptxas-options;-v;-keep;-allow-unsupported-compiler;-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+set(CUDA_NVCC_FLAGS "-std=c++17;--ptxas-options;-v;-keep;-allow-unsupported-compiler;-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
 
 # clang this will pass '-v' option to ptxas assembler
 #set(CUDA_NVCC_FLAGS "-Xcuda-ptxas;-v;-Xcuda-ptxas;--opt-level=3;-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
@@ -67,9 +67,10 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 add_executable(${PROJECT_NAME} ${SRC} ${INC} ${CUDA_FILES})
 
 set(TARGET_BIN "$<TARGET_FILE_NAME:gpu_playground>")
+# NOTEL: this only worls with 'cubin' not exe files
 #add_custom_command(TARGET ${PROJECT_NAME}
 #    POST_BUILD
-#    COMMAND ${CUDA_TOOLKIT_ROOT_DIR}/bin/nvdisasm ${TARGET_BIN} ??? better output
+#    COMMAND ${CUDA_TOOLKIT_ROOT_DIR}/bin/nvdisasm -ndf ${TARGET_BIN}
 #    WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
 #)
 

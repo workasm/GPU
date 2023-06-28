@@ -19,7 +19,7 @@ namespace cg = cooperative_groups;
 #include "common_types.h"
 #include "common_funcs.cu"
 
-#if 1
+#if 0
 #define PRINTZ(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define PRINTZ(fmt, ...)
@@ -151,8 +151,8 @@ __device__ __inline__ NT reduce_C(uint32_t lane, NT wC)
 }
 
 // sorts N arrays of type NT in one loop, NT must suppport '==' and '<' operations
-template < int N, class NT >
-__device__ __inline__ void bitonicWarpSort(uint32_t lane, NT (&V)[N])
+template < int N, class NT, class KeyFunc >
+__device__ __inline__ void bitonicWarpSort(uint32_t lane, NT (&V)[N], KeyFunc Key)
 {
     for(int j = 4; j >= 0; j--) {
 
@@ -162,8 +162,8 @@ __device__ __inline__ void bitonicWarpSort(uint32_t lane, NT (&V)[N])
         for(int i = 0; i < N; i++)
         {
             auto X = shflType< stXor >(V[i], SH);
-            int set = bit ^ (V[i] < X);
-            if(!(set | V[i] == X)) {
+            int set = bit ^ (Key(V[i]) < Key(X));
+            if(!(set | Key(V[i]) == Key(X))) {
                 V[i] = X;
             }
         }
@@ -183,33 +183,29 @@ __device__ __inline__ void bitonicWarpSort(uint32_t lane, NT (&V)[N])
     } // for
 }
 
-__device__ __inline__ void merge_seqs32(uint32_t thX)
+// populates warp histogram [A,B] adding a sorted sequence C to it
+// KeyFunc - functor to extract comparable 'keys' from 'NT'
+// ValFunc - functor to extract data part from NT (only for debugging)
+template < class NT, class KeyFunc, class ValFunc, class ReduceOp >
+__device__ __inline__ void merge_seqs32(int32_t lane, NT& A, NT& B, NT C, KeyFunc Key, ValFunc Val, ReduceOp Reduce)
 {
-    const uint32_t allmsk = 0xffffffffu, shfl_c = 31;
-
-    // we are given: per-thread mem offset
-    // num and denom (as data)
-
     // for each thread we have 2 accumulators:
     // 1. ofs - mem ofs where to store (in sorted order)
     // 2. num and denom - the data which we store (this could be taken as 64-bit value???)
 
-    const int32_t lane = thX % 32;
-    uint32_t A = lane * 1100/129,/*253 / 129,*/
-             B = (lane + 32) * 1100 / 129, // [A,B] has no duplicates
-             C = (lane + 7) * 137 / 1119;
+//    uint32_t eq = __ballot_sync(allmsk, C); // find delimiter threads
+//    if(eq == allmsk) {
+//        // perform special handling if all 'C's are equal
+//        //PRINTZ("eq = %d", eq);
+//    }
 
-    uint32_t eq = __ballot_sync(allmsk, C); // find delimiter threads
-    if(eq == allmsk) {
-        // perform special handling if all 'C's are equal
-        //PRINTZ("eq = %d", eq);
-    }
+    const uint32_t allmsk = 0xffffffffu;
 
-    // we have two sorted seqs [A;B] and C
-    uint32_t revC = __shfl_sync(allmsk, C, 31 - lane);
-    uint32_t sA = A, sB = min(B, revC);
-    uint32_t revB = __shfl_sync(allmsk, B, 31 - lane);
-    uint32_t sC = max(C, revB);
+    // we have two sorted seqs [A;B] and C, merge them to produce 3 bitonic sequences
+    auto revC = shflType< stSync >(C, 31 - lane);
+    auto sA = A, sB = Key(B) < Key(revC) ? B : revC; // // min(B, revC);
+    auto revB = shflType< stSync >(B, 31 - lane);
+    auto sC = Key(C) > Key(revB) ? C : revB; // max(C, revB);
 
     //PRINTZ("orig: %d; A: %d; B: %d; C: %d", lane, A, B, C);
 //    {
@@ -237,31 +233,28 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
 
     // we have 2 bitonic sequences now: [sA; sB] and sC
     // first bitonic sort step of [sA and sB] -> need
-    A = min(sA, sB),
-    B = max(sA, sB);
+    A = Key(sA) < Key(sB) ? sA : sB;
+    B = Key(sA) > Key(sB) ? sA : sB;
     C = sC;
     // we have 3 bitonic sequences: A, B and C
     // where it holds that elems of A <= elems of B <= elems of C
     // that is, [A, B, C] is partially sorted
-    PRINTZ("bitonic: %d; sA: %d; sB: %d; sC: %d", lane, A, B, C);
+    PRINTZ("bitonic: %d; sA: %d; sB: %d; sC: %d", lane, Key(A), Key(B), Key(C));
 
-    uint32_t V[3] = { A, B, C };
-    bitonicWarpSort(lane, V);
+    NT V[3] = { A, B, C }; // warp sort three sequences in parallel
+    bitonicWarpSort(lane, V, Key);
+    A = V[0], B = V[1], C = V[2];
 
-    PRINTZ("sorted: %d; sA: %d; sB: %d; sC: %d", lane, V[0], V[1], V[2]);
-
-    W wA = { V[0], 1 };
-    W wB = { V[1], 1 };
-    W wC = { V[2], 1 };
+    PRINTZ("sorted: %d; sA: %d; sB: %d; sC: %d", lane, Key(A), Key(B), Key(C));
 
     uint32_t idx = lane - 1;
-    auto xA = __shfl_sync(allmsk, wA.x, idx);
-    auto xB = __shfl_sync(allmsk, wB.x, idx);
-    auto xC = __shfl_sync(allmsk, wC.x, idx);
-    bool leader[3];
-    leader[0] = wA.x != xA;
-    leader[1] = wB.x != (lane == 0 ? xA : xB);
-    leader[2] = wC.x != (lane == 0 ? xB : xC);
+    auto xA = shflType< stSync >(Key(A), idx);
+    auto xB = shflType< stSync >(Key(B), idx);
+    auto xC = shflType< stSync >(Key(C), idx);
+
+    bool leader[3] = { Key(A) != xA,
+                       Key(B) != (lane == 0 ? xA : xB),
+                       Key(C) != (lane == 0 ? xB : xC) };
 
     // if(leaderC != 0) => need to flash leaderC, i.e. write it to mem
     //PRINTZ("%d leader: [%d: %d; %d]", lane, leader[0], leader[1], leader[2]);
@@ -286,27 +279,23 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
 
         int32_t idx = lane + i, pred = 0;
         // we do not need wrap around for pA: hence could use predicate
-        auto pA = shflDownPred(wA, i, pred);
-        auto pB = shflType< stSync >(wB, idx);
-        auto pC = shflType< stSync >(wC, idx);
-        if(pred) { // here lane + i < 32
-            if(wA.x == pA.x)
-                wA.y += pA.y;
-            if(wB.x == pB.x)
-                wB.y += pB.y;
-            if(wC.x == pC.x)
-                wC.y += pC.y;
-        } else {
-            if(wA.x == pB.x)
-                wA.y += pB.y;
-            if(wB.x == pC.x)
-                wB.y += pC.y;
-        }
+        auto pA = shflDownPred(A, i, pred);
+        auto pB = shflType< stSync >(B, idx);
+        auto pC = shflType< stSync >(C, idx);
+
+        auto cmpA = pred ? pA : pB;
+        auto cmpB = pred ? pB : pC;
+        if(Key(A) == Key(cmpA))
+            Reduce(A, cmpA);
+        if(Key(B) == Key(cmpB))
+            Reduce(B, cmpB);
+        if(pred & (Key(C) == Key(pC)))  // here lane + i < 32
+            Reduce(C, pC);
     }
 
     PRINTZ("%d posA: %d; val/num: %d / %d; posB: %d; val/num: %d / %d; posC: %d val/num: %d / %d",
-           lane, pos[0], wA.x, wA.y, pos[1], wB.x, wB.y,
-            pos[2], wC.x, wC.y);
+           lane, pos[0], Key(A), Val(A), pos[1], Key(B), Val(B),
+            pos[2], Key(C), Val(C));
 
     //        A    B    C
     // val:   1122 2334 4445
@@ -321,9 +310,9 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     // at the end, 'leader' threads contain data, remaining threads contain garbage..
     // they will be tightly packed at the end:
 
-    wA.v = __shfl_sync(allmsk, wA.v, pos[0]); // read from pos-th thread
-    wB.v = __shfl_sync(allmsk, wB.v, pos[1]); // read from pos-th thread
-    wC.v = __shfl_sync(allmsk, wC.v, pos[2]); // read from pos-th thread
+    A = shflType< stSync >(A, pos[0]); // read from pos-th thread
+    B = shflType< stSync >(B, pos[1]); // read from pos-th thread
+    C = shflType< stSync >(C, pos[2]); // read from pos-th thread
 
     //  sorted:  11112 22333 33444
     //  leader:  10001 00100 00100
@@ -334,10 +323,10 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     // total cannot be 0 since we have at least some data in A
     int32_t total = __popc(OK[0]);
     // cyclic rotate wB by total to merge results with 'A'
-     wB.v = __shfl_sync(allmsk, wB.v, lane - total); // read from pos-th thread
+    B = shflType< stSync >(B, lane - total); // read from pos-th thread
 
     if(lane >= total) { // this indicates that the N-th thread did not find the N-th bit set
-        wA = wB;
+        A = B;
     }
     // valid data left in B is: (32 - totalA) - totalB
     int32_t numB = __popc(OK[1]), numC = __popc(OK[2]);
@@ -351,26 +340,26 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
             PRINTZ("taking wA <- wC branch");
 
         // cyclic rotate wC to merge with wB
-        wC.v = __shfl_sync(allmsk, wC.v, lane - total); // read from pos-th thread
+        C = shflType< stSync >(C, lane - total); // read from pos-th thread
         if(lane >= total) {
-            wA = wC;
+            A = C;
         }
-        wB = wC; // move rest of wC into wB if any
+        B = C; // move rest of wC into wB if any
 
         total += numC;
         if(lane >= total) // probably not necessary but good for debugging
-            wA = {};
+            A = {};
 
         int32_t leftC = 32 - total;
         // if leftC < 0 => some elements of wC are left in wB
         if(lane >= -leftC) {
-            wB = {};
+            B = {};
         }
-        wC = {}; // in this case C will be completely moved to B
+        C = {}; // in this case C will be completely moved to B
 
     // no space left in A to move C => move C into B
     } else {
-        uint32_t occupiedB = total - 32; // indicated how much is occupied in B, must be >= 0
+        int32_t occupiedB = total - 32; // indicated how much is occupied in B, must be >= 0
         // numA = 25, numB = 24, total = 49
         // space left free in B is: 64 - total = 15
         // sapce occupied in B is: 32 - (64 - total) = total - 32
@@ -378,9 +367,9 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
         if(lane == 0)
             PRINTZ("taking wA <- wB <- wC branch, total: %d, occupiedB: %d", total, occupiedB);
 
-        wC.v = __shfl_sync(allmsk, wC.v, lane - occupiedB); // read from pos-th thread
+        C = shflType< stSync >(C, lane - occupiedB); // read from pos-th thread
         if(lane >= occupiedB) { // this indicates that the N-th thread did not find the N-th bit set
-            wB = wC;
+            B = C;
         }
         occupiedB += numC;
 
@@ -388,7 +377,7 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
             PRINTZ("occupiedB = %d", occupiedB);
 
         if(lane >= occupiedB) {
-            wB = {};
+            B = {};
         }
 
         int32_t leftC = occupiedB - 32; // leftC == total - 64: amount of elements left free in C
@@ -396,24 +385,16 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
 
         // this is probably a wrong condition!!
         if(lane >= leftC) {
-            wC = {};
+            C = {};
         }
     }
 
     PRINTZ("%d posA: %d; val/num: %d / %d; posB: %d; val/num: %d / %d; posC: %d val/num: %d / %d",
-           lane, pos[0], wA.x, wA.y, pos[1], wB.x, wB.y,
-            pos[2], wC.x, wC.y);
+           lane, pos[0], Key(A), Val(A), pos[1], Key(B), Val(B),
+            pos[2], Key(C), Val(C));
 
-    if(wA.y + wB.y + wC.y == 111111)
+    if(Val(A) + Val(B) + Val(C) == 111111)
         __syncthreads();
-
-    // suppose warp sz = 4
-    //                    A    B    C
-    // [A,B,C] is sorted: 1111 1334 4445
-    // should pack it as: 1345 xxxx xxxx
-    //            counts: 5241 0000 0000
-
-    // [A,B] - holds quantity, C - is added to it
 }
 
 
@@ -650,7 +631,36 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
                outerRadSq = params.outerRadX * params.outerRadX;
 
     if(bidx == 0 && thX < 32) {
-        merge_seqs32(thX);
+
+        int32_t lane = thX;
+        int2 A = {lane * 100/129, 1},/*253 / 129,*/
+             B = {(lane + 32) * 100 / 129, 1}, // [A,B] has no duplicates
+             C = {(lane + 7) * 137 / 1119, 1};
+
+        auto keyFunc = [](const auto& V) { return V.x; };
+        auto valFunc = [](const auto& V) { return V.y; };
+        merge_seqs32(lane, A, B, C, keyFunc, valFunc, [](auto& lhs, const auto& rhs) {
+            lhs.y += rhs.y;
+        });
+
+            // we are given: per-thread mem offset
+            // num and denom (as data)
+
+            // for each thread we have 2 accumulators:
+            // 1. ofs - mem ofs where to store (in sorted order)
+            // 2. num and denom - the data which we store (this could be taken as 64-bit value???)
+
+        //    const int32_t lane = thX % 32;
+        //    uint32_t A = lane * 100/129,/*253 / 129,*/
+        //             B = (lane + 32) * 100 / 129, // [A,B] has no duplicates
+        //             C = (lane + 7) * 137 / 1119;
+
+        //    uint32_t eq = __ballot_sync(allmsk, C); // find delimiter threads
+        //    if(eq == allmsk) {
+        //        // perform special handling if all 'C's are equal
+        //        //PRINTZ("eq = %d", eq);
+        //    }
+
     }
     return;
 
