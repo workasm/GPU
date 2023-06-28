@@ -150,54 +150,43 @@ __device__ __inline__ NT reduce_C(uint32_t lane, NT wC)
     return wC;
 }
 
-template < class NT >
-__device__ __inline__ NT bitonicSort(uint32_t lane, NT V)
+// sorts N arrays of type NT in one loop, NT must suppport '==' and '<' operations
+template < int N, class NT >
+__device__ __inline__ void bitonicWarpSort(uint32_t lane, NT (&V)[N])
 {
     for(int j = 4; j >= 0; j--) {
-        int N = 1 << j;
 
-        // idx = lane ^ N
-        auto X = shflType< stXor >(key, N);
-        auto set = (lane & N) == N;
-        set ^= (V < X);
-        set = set | (V == X);
-        if(set == 0) {
-            V = X;
+        int SH = 1 << j;
+        int bit = (lane & SH) == SH;
+#if 1
+        for(int i = 0; i < N; i++)
+        {
+            auto X = shflType< stXor >(V[i], SH);
+            int set = bit ^ (V[i] < X);
+            if(!(set | V[i] == X)) {
+                V[i] = X;
+            }
         }
-    }
-
-    return V;
-#if 0
-        uint32_t bit = bfe(lane, j, 1); // checks j-th bit
-        uint32_t dA = wA.x < xA.x, dB = wB.x < xB.x;
-        if(bit == dA && wA.x != xA.x) // do not do anything on move
-            wA = xA;
-        if(bit == dB && wB.x != xB.x)
-            wB = xB;
-#elif 0
+#else
         asm volatile(R"({
           .reg .u32 bit,dA;
           .reg .pred p, q, r;
-          and.b32 bit, %4, %5;
-          setp.eq.u32 q, bit, %5; // q = lane & N == N
+          and.b32 bit, %1, %2;
+          setp.eq.u32 q, bit, %2; // q = lane & N == N
             // is it possible to enforce swap when wA == xA for all cases ??
-          setp.lt.xor.u32 p, %0, %6, q;  // p = wA.x < xA.x XOR q
-          setp.eq.or.u32 p, %0, %6, p;   // p = wA.x == xA.x OR p
-          @!p mov.u32 %0, %6; // if (p ^ q) == 0
-          @!p mov.u32 %1, %7;
-          setp.lt.xor.u32 p, %2, %8, q;  // p = wB.x < xB. XOR q
-          setp.eq.or.u32 p, %2, %8, p;   // p = wB.x == xB.x OR p
-          @!p mov.u32 %2, %8; // if (p ^ q) == 0
-          @!p mov.u32 %3, %9;
+          setp.lt.xor.u32 p, %0, %3, q;  // p = wA.x < xA.x XOR q
+          setp.eq.or.u32 p, %0, %3, p;   // p = wA.x == xA.x OR p
+          @!p mov.u32 %0, %3; // if (p ^ q) == 0
         })"
-        : "+r"(wA.x), "+r"(wA.y), "+r"(wB.x), "+r"(wB.y) : // 0, 1, 2, 3
-            "r"(lane), "r"(N),                             // 4, 5
-            "r"(xA.x), "r"(xA.y), "r"(xB.x), "r"(xB.y));   // 6, 7, 8, 9
+        : "+r"(V) : "r"(lane), "r"(N), "r"(X));   // 3
 #endif
+    } // for
 }
 
 __device__ __inline__ void merge_seqs32(uint32_t thX)
 {
+    const uint32_t allmsk = 0xffffffffu, shfl_c = 31;
+
     // we are given: per-thread mem offset
     // num and denom (as data)
 
@@ -206,12 +195,17 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     // 2. num and denom - the data which we store (this could be taken as 64-bit value???)
 
     const int32_t lane = thX % 32;
-    uint32_t A = lane * 100/129,/*253 / 129,*/
-             B = (lane + 32) * 100 / 129, // [A,B] has no duplicates
+    uint32_t A = lane * 1100/129,/*253 / 129,*/
+             B = (lane + 32) * 1100 / 129, // [A,B] has no duplicates
              C = (lane + 7) * 137 / 1119;
 
+    uint32_t eq = __ballot_sync(allmsk, C); // find delimiter threads
+    if(eq == allmsk) {
+        // perform special handling if all 'C's are equal
+        //PRINTZ("eq = %d", eq);
+    }
+
     // we have two sorted seqs [A;B] and C
-    const uint32_t allmsk = 0xffffffffu, shfl_c = 31;
     uint32_t revC = __shfl_sync(allmsk, C, 31 - lane);
     uint32_t sA = A, sB = min(B, revC);
     uint32_t revB = __shfl_sync(allmsk, B, 31 - lane);
@@ -221,72 +215,6 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
 //    {
 //        W wC = {C, 1};
 //        auto xC = reduce_C(lane, wC);
-//        if(xC.x + xC.y == 9999999)
-//            __threadfence();
-//        PRINTZ("%d: C: %d/%d", lane, xC.x, xC.y);
-//        return;
-//    }
-
-    // we have 2 bitonic sequences now: [sA; sB] and sC
-    // first bitonic sort step of [sA and sB] -> need
-    A = min(sA, sB),
-    B = max(sA, sB);
-    C = sC;
-    // we have 3 bitonic sequences: A, B and C
-    // where it holds that elems of A <= elems of B <= elems of C
-    // that is, [A, B, C] is partially sorted
-    PRINTZ("bitonic: %d; sA: %d; sB: %d; sC: %d", lane, A, B, C);
-
-
-    // TODO: we need generic warp sort with payload
-    W V = { A, B };
-    // bitonic sort sA, sB and C sequences..
-    for(int j = 4; j >= 0; j--) {
-        int N = 1 << j;
-        W xV;
-        auto xC = __shfl_xor_sync(allmsk, C, N);
-        xV.v = __shfl_xor_sync(allmsk, V.v, N);
-
-        if(lane & N) {
-            V.x = max(V.x, xV.x);
-            V.y = max(V.y, xV.y);
-            C = max(C, xC);
-        } else {
-            V.x = min(V.x, xV.x);
-            V.y = min(V.y, xV.y);
-            C = min(C, xC);
-        }
-#if 0
-        uint32_t bit = bfe(lane, j, 1); // checks j-th bit
-        uint32_t dA = wA.x < xA.x, dB = wB.x < xB.x;
-        if(bit == dA && wA.x != xA.x) // do not do anything on move
-            wA = xA;
-        if(bit == dB && wB.x != xB.x)
-            wB = xB;
-#elif 0
-        asm volatile(R"({
-          .reg .u32 bit,dA;
-          .reg .pred p, q, r;
-          and.b32 bit, %4, %5;
-          setp.eq.u32 q, bit, %5; // q = lane & N == N
-            // is it possible to enforce swap when wA == xA for all cases ??
-          setp.lt.xor.u32 p, %0, %6, q;  // p = wA.x < xA.x XOR q
-          setp.eq.or.u32 p, %0, %6, p;   // p = wA.x == xA.x OR p
-          @!p mov.u32 %0, %6; // if (p ^ q) == 0
-          @!p mov.u32 %1, %7;
-          setp.lt.xor.u32 p, %2, %8, q;  // p = wB.x < xB. XOR q
-          setp.eq.or.u32 p, %2, %8, p;   // p = wB.x == xB.x OR p
-          @!p mov.u32 %2, %8; // if (p ^ q) == 0
-          @!p mov.u32 %3, %9;
-        })"
-        : "+r"(wA.x), "+r"(wA.y), "+r"(wB.x), "+r"(wB.y) : // 0, 1, 2, 3
-            "r"(lane), "r"(N),                             // 4, 5
-            "r"(xA.x), "r"(xA.y), "r"(xB.x), "r"(xB.y));   // 6, 7, 8, 9
-#endif
-
-    }
-    PRINTZ("sorted: %d; sA: %d; sB: %d; sC: %d", lane, V.x, V.y, C);
-
     // question is: can we live with fragmented values ??
 
     // leader is the lowest thread with equal val
@@ -305,15 +233,26 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
     // lane 2: idx = 1
     // lane 3: idx = 2
     // lane 5: idx = 3
+//    }
 
-    // yes, these threads can read 'idx'
+    // we have 2 bitonic sequences now: [sA; sB] and sC
+    // first bitonic sort step of [sA and sB] -> need
+    A = min(sA, sB),
+    B = max(sA, sB);
+    C = sC;
+    // we have 3 bitonic sequences: A, B and C
+    // where it holds that elems of A <= elems of B <= elems of C
+    // that is, [A, B, C] is partially sorted
+    PRINTZ("bitonic: %d; sA: %d; sB: %d; sC: %d", lane, A, B, C);
 
-    // set bit 'i' : at position [i; 2*i]
-    // 11, 011, 101, 011
+    uint32_t V[3] = { A, B, C };
+    bitonicWarpSort(lane, V);
 
-    W wA = { V.x, 1 };
-    W wB = { V.y, 1 };
-    W wC = { C, 1 };
+    PRINTZ("sorted: %d; sA: %d; sB: %d; sC: %d", lane, V[0], V[1], V[2]);
+
+    W wA = { V[0], 1 };
+    W wB = { V[1], 1 };
+    W wC = { V[2], 1 };
 
     uint32_t idx = lane - 1;
     auto xA = __shfl_sync(allmsk, wA.x, idx);
@@ -345,26 +284,30 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
             }
         }
 
-        W pA, pB, pC;
-        uint32_t idx = lane + i;
+        int32_t idx = lane + i, pred = 0;
         // we do not need wrap around for pA: hence could use predicate
-        pA.v = __shfl_down_sync(allmsk, wA.v, i);
-        pB.v = __shfl_sync(allmsk, wB.v, idx);
-        pC.v = __shfl_sync(allmsk, wC.v, idx);
-        if(idx < 32) {
+        auto pA = shflDownPred(wA, i, pred);
+        auto pB = shflType< stSync >(wB, idx);
+        auto pC = shflType< stSync >(wC, idx);
+        if(pred) { // here lane + i < 32
             if(wA.x == pA.x)
                 wA.y += pA.y;
             if(wB.x == pB.x)
                 wB.y += pB.y;
             if(wC.x == pC.x)
                 wC.y += pC.y;
-        } else { // this is a case for wrap around
+        } else {
             if(wA.x == pB.x)
                 wA.y += pB.y;
             if(wB.x == pC.x)
                 wB.y += pC.y;
         }
     }
+
+    PRINTZ("%d posA: %d; val/num: %d / %d; posB: %d; val/num: %d / %d; posC: %d val/num: %d / %d",
+           lane, pos[0], wA.x, wA.y, pos[1], wB.x, wB.y,
+            pos[2], wC.x, wC.y);
+
     //        A    B    C
     // val:   1122 2334 4445
     // final: 1234 5xxx xxxx
@@ -427,26 +370,28 @@ __device__ __inline__ void merge_seqs32(uint32_t thX)
 
     // no space left in A to move C => move C into B
     } else {
-        if(lane == 0)
-            PRINTZ("taking wA <- wB <- wC branch");
+        uint32_t occupiedB = total - 32; // indicated how much is occupied in B, must be >= 0
+        // numA = 25, numB = 24, total = 49
+        // space left free in B is: 64 - total = 15
+        // sapce occupied in B is: 32 - (64 - total) = total - 32
 
-        int32_t spaceB = 32 - total; // indicated how much is occupied in B
-        wC.v = __shfl_sync(allmsk, wC.v, lane - spaceB); // read from pos-th thread
-        if(lane >= spaceB) { // this indicates that the N-th thread did not find the N-th bit set
+        if(lane == 0)
+            PRINTZ("taking wA <- wB <- wC branch, total: %d, occupiedB: %d", total, occupiedB);
+
+        wC.v = __shfl_sync(allmsk, wC.v, lane - occupiedB); // read from pos-th thread
+        if(lane >= occupiedB) { // this indicates that the N-th thread did not find the N-th bit set
             wB = wC;
         }
-        total += numC;
-        int32_t leftB = total - 32; // amount of elements left free in B
+        occupiedB += numC;
 
         if(lane == 0)
-            PRINTZ("leftB = %d", leftB);
+            PRINTZ("occupiedB = %d", occupiedB);
 
-        if(lane >= 64 - total) {
+        if(lane >= occupiedB) {
             wB = {};
         }
 
-        ///
-        int32_t leftC = total - 64; // amount of elements left free in C
+        int32_t leftC = occupiedB - 32; // leftC == total - 64: amount of elements left free in C
         //! if(leftC > 0) => this indicated overflow !! i.e. the histogram is full, it must be uploaded
 
         // this is probably a wrong condition!!
