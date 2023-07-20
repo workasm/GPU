@@ -84,7 +84,7 @@ public:
     }
 
     // z format: [x, y, sig1, sig2, ...] total of m_params.numSignals + 2
-    void addPoint(const double *z) noexcept
+    void addPoint(const InputReal *z) noexcept
     {
         size_t totalS = m_params.numSignals + 2, zi = 2; // skip first x/y signals
         for (; zi < totalS; zi++)

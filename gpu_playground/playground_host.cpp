@@ -291,15 +291,18 @@ static std::tuple<size_t, std::vector< InputReal >> generateGaussian(int w, int 
         cv::circle(orig, cv::Point2d(x,y), (int)r, cv::Scalar(s_nan), -1);
     }
 
-    std::vector< InputReal > out;
-    out.reserve(w * h * (nDataSigs + 2));
+    size_t bufS = w * h;
+    std::vector< InputReal > out(bufS * (nDataSigs + 2));
+    auto pX = out.data(), pY = pX + bufS, pData = pY + bufS;
 
-    for(int y = 0; y < h; y++) {
+    for(int y = 0, i = 0; y < h; y++) {
         auto pin = orig.ptr< float >(y);
-        for(int x = 0; x < w; x++) {
-            out.insert(out.end(), {(InputReal)x, (InputReal)y});
-            for(size_t j = 0; j < nDataSigs; j++) {
-                out.push_back((InputReal)pin[x]);
+        for(int x = 0; x < w; x++, i++) {
+            pX[i] = (InputReal)x;
+            pY[i] = (InputReal)y;
+            auto pp = pData;
+            for(size_t j = 0; j < nDataSigs; j++, pp += bufS) {
+                pp[i] = (InputReal)pin[x];
             }
         }
     }
@@ -384,6 +387,7 @@ void GPU_interpolator::run() {
     std::string fpath(__FILE__); // search for file in the source directory
     fpath = fpath.substr(0, fpath.find_last_of("\\/")); // what if npos ??
 
+    // this returns 'numDataSigs + 2' arrays of type InputReal each of size 'nCols * nRows'
     const auto [nSamples, in] = //zobj.readFromFile(fpath + "/output_20Khz_new_500x500.bin");
                                generateGaussian< InputReal >(nCols, nRows, numDataSigs);
     m_nSamples = nSamples;
@@ -406,8 +410,16 @@ void GPU_interpolator::run() {
 
     std::atomic_bool cancel{};
     CPU_BEGIN_TIMING(HostInterp);
-    for(auto start = in.data(), ptr = start; ptr < start + in.size(); ptr += numDataSigs + 2) {
-        zobj.addPoint(ptr);
+
+    //for(auto start = in.data(), ptr = start; ptr < start + in.size(); ptr += numDataSigs + 2) {
+    std::vector< InputReal > xbuf(numDataSigs + 2); // temporary buf for SoA -> AoS
+    for(uint32_t i = 0; i < m_nSamples; i++) {
+
+        auto pp = in.data() + i;
+        for(uint32_t k = 0, sz = p.w * p.h; k < numDataSigs + 2; k++, pp += sz) {
+            xbuf[k] = pp[0];
+        }
+        zobj.addPoint(xbuf.data());
     }
     zobj.process(cancel);
     CPU_END_TIMING(HostInterp);
@@ -418,7 +430,7 @@ void GPU_interpolator::run() {
 
     DisplayImageCV disp;
     //disp.show(cv::Mat(cv::Size(p.w, p.h), CV_32FC(p.numSignals), m_devOutCPU));
-//    disp.show(outImg);
+    disp.show(outImg);
 }
 
 // need vector type for memory allocations..
