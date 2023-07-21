@@ -102,55 +102,56 @@ public:
             m_pofs->write((const char *)z, sizeof(double) * totalS);
         }
 
-        int minX = std::max(0, cvCeil(z[0] - m_params.innerRadX)),
-            maxX = std::min((int)m_params.w - 1, cvFloor(z[0] + m_params.innerRadX)),
-            minY = std::max(0, cvCeil(z[1] - m_params.innerRadY)),
-            maxY = std::min((int)m_params.h - 1, cvFloor(z[1] + m_params.innerRadY));
+        int minX = cvCeil(z[0] - m_params.innerRadX),
+            maxX = cvFloor(z[0] + m_params.innerRadX),
+            minY = cvCeil(z[1] - m_params.innerRadY),
+            maxY = cvFloor(z[1] + m_params.innerRadY);
 
         OutputReal innerRadSq = m_params.innerRadX * m_params.innerRadX;
 
         constexpr OutputReal eps = (OutputReal)1e-4;
-        const size_t nSigs = m_params.numSignals, ystep = m_pixels.stepT(),
-                     ptrMin = minX * nSigs, ptrMax = maxX * nSigs;
-
-        auto ptr = m_pixels[minY];
+        const size_t nSigs = m_params.numSignals, ystep = m_pixels.stepT();
+        auto pixLine = m_pixels[minY];
         auto sigs = z + 2;
 
 //        XPRINTZ("add point: (%.3f;%.3f;%.3f); min: [%d;%d]; max: [%d;%d] -- %d %d",
 //                        z[0], z[1], z[2], minX, minY, maxX, maxY, ptrMin, ptrMax);
 
-        for (int iy = minY; iy <= maxY; iy++, ptr += ystep)
+        for(int iy = minY; iy <= maxY; iy++, pixLine += ystep)
         {
+            if((uint32_t)iy >= m_params.h)
+                continue;
+
             OutputReal dx = minX - (OutputReal)z[0], dy = iy - (OutputReal)z[1], dyQ = dy * dy;
 
-            for (auto ix = ptr + ptrMin; ix <= ptr + ptrMax; dx += 1)
+            auto ppix = pixLine + minX * nSigs;
+            for (auto ix = minX; ix <= maxX; ix++, dx += 1)
             {
                 OutputReal wd = dyQ + dx * dx;
-//                if (wd > innerRadSq)
-//                {
-//                    ix += nSigs;
-//                    continue;
-//                }
+                if((uint32_t)ix >= m_params.w /*|| wd > innerRadSq*/) {
+                    ppix += nSigs;
+                    continue;
+                }
 
-                OutputReal denom = (wd < eps ? OutputReal(-1) : (OutputReal)1 / wd);
-                for (size_t i = 0; i < nSigs; i++, ix++)
+                OutputReal denom = (wd < eps && false ? OutputReal(-1) : (OutputReal)1 / wd);
+                for (size_t i = 0; i < nSigs; i++, ppix++)
                 {
                     // this point is either not set (NaN) or has been set exactly..
-                    if (!std::isfinite(sigs[i]) || ix->denom < 0)
+                    if (!std::isfinite(sigs[i]) || ppix->denom < 0)
                         continue;
 
-                    ix->num += (OutputReal)sigs[i], ix->denom += 1;
-                    ix->Ninner = 1;
+                    ppix->num += (OutputReal)sigs[i] * denom, ppix->denom += denom;
+                    ppix->Ninner = 1;
                     continue; ///! HACK
 
-                    ix->Ninner++;
+                    ppix->Ninner++;
                     if (denom < 0)
                     {                                             // set this point exactly
-                        ix->num = -(OutputReal)sigs[i], ix->denom = -1; // negative denom indicates the exact point
+                        ppix->num = -(OutputReal)sigs[i], ppix->denom = -1; // negative denom indicates the exact point
                     }
                     else
                     {
-                        ix->num += (OutputReal)sigs[i] / wd, ix->denom += denom;
+                        ppix->num += (OutputReal)sigs[i] / wd, ppix->denom += denom;
                     }
                 } // for signals
             }     // for ix

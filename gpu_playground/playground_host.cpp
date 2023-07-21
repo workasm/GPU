@@ -351,7 +351,7 @@ void GPU_interpolator::run() {
     const uint32_t nCols = 500, nRows = 500,
             numDataSigs = 1;
     const float stepX = 1, stepY = 1,
-          innerRad = 3, outerRad = 5;
+          innerRad = 10, outerRad = 10;
 
 //    uint32_t num = 0x55555555;
 //    for(int N = 1; N <= 32; N++) {

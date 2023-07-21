@@ -378,7 +378,6 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
     // NOTE: InterpPix can be stored as SoA (struct of arrays)
     for(uint32_t ofs = pos; ofs < nSamples; ofs += grid.size()) {
 
-        //auto sh = ofs*stride;
         auto wh = params.w * params.h;
         auto x = (OutputReal)devIn[ofs], y = (OutputReal)devIn[ofs + wh],
              sig = (OutputReal)devIn[ofs + wh*2];
@@ -389,10 +388,10 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
         if(isnan(sig))
             continue;
 
-        int minX = max(0, (int)ceil(x - params.innerRadX)),
-            maxX = min((int)params.w - 1, (int)floor(x + params.innerRadX)),
-            minY = max(0, (int)ceil(y - params.innerRadY)),
-            maxY = min((int)params.h - 1, (int)floor(y + params.innerRadY));
+        int minX = (int)ceil(x - params.innerRadX),
+            maxX = (int)floor(x + params.innerRadX),
+            minY = (int)ceil(y - params.innerRadY),
+            maxY = (int)floor(y + params.innerRadY);
 
         for(int iy = minY; iy <= maxY; iy++)
         {
@@ -402,12 +401,16 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
                 if(bidx == 0 && m == 0 && thX < 32) {
                  }
 
-                auto iptr = devPix + memofs;
                 const OutputReal dx = ix - x, dy = iy - y,
                            wd = dy * dy + dx * dx,
                            denom = (OutputReal)1 / wd;
-                atomicAdd(&iptr->num, sig);
-                atomicAdd(&iptr->denom, 1);
+
+                auto iptr = devPix + memofs;
+                if((uint32_t)iy < params.h && (uint32_t)ix < params.w) {
+
+                    atomicAdd(&iptr->num, sig * denom);
+                    atomicAdd(&iptr->denom, denom);
+                }
                 continue;
 
                 if(wd < eps) {
