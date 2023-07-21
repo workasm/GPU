@@ -1,4 +1,7 @@
 
+#ifndef COMMON_FUNCS_CU
+#define COMMON_FUNCS_CU 1
+
 #include <math.h>
 
 // C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v10.1/include/
@@ -205,3 +208,5 @@ __device__ __forceinline__  T prefixSum(cg::thread_block cta, const T& data, Red
     }
     return X;
 }
+
+#endif // COMMON_FUNCS_CU

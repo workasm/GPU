@@ -348,10 +348,10 @@ void GPU_interpolator::run() {
     using DataInterp = DataInterpolator<InputReal, OutputReal>;
     DataInterp zobj;
 
-    const uint32_t nCols = 500, nRows = 500,
+    const uint32_t nCols = 128, nRows = 128,
             numDataSigs = 1;
     const float stepX = 1, stepY = 1,
-          innerRad = 10, outerRad = 10;
+          innerRad = 3, outerRad = 3;
 
 //    uint32_t num = 0x55555555;
 //    for(int N = 1; N <= 32; N++) {

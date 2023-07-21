@@ -137,9 +137,10 @@ public:
                 for (size_t i = 0; i < nSigs; i++, ppix++)
                 {
                     // this point is either not set (NaN) or has been set exactly..
-                    if (!std::isfinite(sigs[i]) || ppix->denom < 0)
-                        continue;
+                    //if (!std::isfinite(sigs[i]) || ppix->denom < 0)
+                    //    continue;
 
+                    denom = 1;
                     ppix->num += (OutputReal)sigs[i] * denom, ppix->denom += denom;
                     ppix->Ninner = 1;
                     continue; ///! HACK
@@ -193,7 +194,7 @@ public:
                     // this point is either not set (NaN) or has been set exactly..
                     if (ix->Ninner > 0 || !std::isfinite(sigs[i]))
                     {
-                        //                        m_innerPts++;
+                        //       m_innerPts++;
                         continue;
                     }
 
