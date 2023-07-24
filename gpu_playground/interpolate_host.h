@@ -92,8 +92,8 @@ public:
             if (std::isfinite(z[zi]))
                 break;
         }
-        if (zi >= totalS) // no data signal with a finite value found => drop it
-            return;
+//        if (zi >= totalS) // no data signal with a finite value found => drop it
+//            return;
 
         m_scanPts.insert(m_scanPts.end(), z, z + totalS);
 
@@ -133,14 +133,14 @@ public:
                     continue;
                 }
 
-                OutputReal denom = (wd < eps && false ? OutputReal(-1) : (OutputReal)1 / wd);
+                OutputReal denom = (wd < eps ? OutputReal(-1) : (OutputReal)1 / wd);
                 for (size_t i = 0; i < nSigs; i++, ppix++)
                 {
                     // this point is either not set (NaN) or has been set exactly..
-                    //if (!std::isfinite(sigs[i]) || ppix->denom < 0)
-                    //    continue;
+                    if (!std::isfinite(sigs[i]) /*|| ppix->denom < 0*/)
+                        continue;
 
-                    denom = 1;
+                    denom = 1; // HACK
                     ppix->num += (OutputReal)sigs[i] * denom, ppix->denom += denom;
                     ppix->Ninner = 1;
                     continue; ///! HACK
@@ -283,6 +283,7 @@ public:
                 {
                     if (pix->Ninner >= 1)
                     {
+                        // HACK:
                         pimgX[i] = pix->num / pix->denom;
                     }
                     else if (pix->Nouter >= 2)

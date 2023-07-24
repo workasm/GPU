@@ -4,6 +4,7 @@
 #include <tuple>
 
 #include <cuda_runtime_api.h>
+#include <cuda.h>
 
 //#ifndef __CUDACC__
 //#define __CUDACC__ 1
@@ -61,28 +62,25 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
         auto reduceF = [](auto& lhs, const auto& rhs) { lhs.y += rhs.y; };
         auto consumeF = [](const auto& V) { PRINTZ("-- consume: %d/%d", V.x, V.y); };
 
-        WarpHistogramTest histo(A, B, keyF, reduceF, consumeF);
-
-        keyF(histo.A) = histo.Invalid;
-        keyF(histo.B) = histo.Invalid;
+        constexpr int32_t Invalid = 0xFFFFFFFF;
+        WarpHistogramTest< Invalid, DataType > histo;
 
         if(lane >= 30) {
-            keyF(histo.B) = histo.Invalid;
+            keyF(histo.B) = Invalid;
             keyF(C) = 71;
         }
         if(lane == 31)
             keyF(C) = 72;
 
         auto warpSh = sh + (thX / 32)*32*3;
-        histo(lane, C, warpSh);
+        histo(lane, C, warpSh, keyF, reduceF, consumeF);
 
         C = {(lane + 7) * 137 / 119, 1};
-        C.x += 2;
-        histo(lane, C, warpSh);
+        C.x += 20;
+        histo(lane, C, warpSh, keyF, reduceF, consumeF);
 
-        C = {(lane + 7) * 137 / 119, 1};
-        C.x += 2;
-        histo(lane, C, warpSh);
+        C.x += 20;
+        histo(lane, C, warpSh, keyF, reduceF, consumeF);
 
             // we are given: per-thread mem offset
             // num and denom (as data)
@@ -104,6 +102,15 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
     constexpr int32_t Invalid = 0xFFFFFFFF;
     WarpHistogramTest< Invalid, DataType > histo;
 
+    auto consumeF = [devPix](const auto& V) {
+        //PRINTZ("-- consume: %d (%.3f, %.3f)", V.key, V.num, V.denom);
+        if(V.key != Invalid) {
+            auto iptr = devPix + V.key;
+            atomicAdd(&iptr->num, V.num);
+            atomicAdd(&iptr->denom, V.denom);
+        }
+    };
+
 #endif
 
     int m = 0;
@@ -117,8 +124,8 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
         // since coordinates x and y are read from global mem, we can only guarantee
         // that x and y are sorted but not that they do not have dups
 
-        if(isnan(sig))
-            continue;
+//        if(isnan(sig))
+//            continue;
 
         int minX = (int)ceil(x - params.innerRadX),
             maxX = (int)floor(x + params.innerRadX),
@@ -131,27 +138,21 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
         {
             for(int ix = minX; ix <= maxX; ix++, m++)
             {
-                auto memofs = iy * params.w + ix;
                 OutputReal dx = ix - x, dy = iy - y,
                            wd = dy * dy + dx * dx,
                            denom = (OutputReal)1 / wd;
 
                 bool ok = (uint32_t)iy < params.h && (uint32_t)ix < params.w;
+                auto memofs = ok && !isnan(sig) ? iy * params.w + ix : Invalid;
+                // if signal is nan: do not add it at all..
                 denom = 1; // hacky
-#if 0
+#if 1
                 auto keyF = [](auto& V) -> auto& { return V.key; };
-                auto reduceF = [](auto& lhs, const auto& rhs) { lhs.num += rhs.num; lhs.denom += rhs.denom; };
+                auto reduceF = [](auto& lhs, const auto& rhs)
+                { lhs.num += rhs.num, lhs.denom += rhs.denom; };
 
                 // NOTE: you should also dump the rest of 'C' at the end of the loop...
                 // ok is per-thread variable !!!
-                auto consumeF = [devPix, ok](const auto& V) {
-                    //PRINTZ("-- consume: %d (%.3f, %.3f)", V.key, V.num, V.denom);
-                    if(ok) {
-                        auto iptr = devPix + V.key;
-                        atomicAdd(&iptr->num, V.num);
-                        atomicAdd(&iptr->denom, V.denom);
-                    }
-                };
 
                 int lane = thX % 32;
                 DataType C{ memofs, sig * denom, denom };
@@ -183,9 +184,12 @@ __global__ void interpolate_stage1(InterpParams< OutputReal > params, size_t nSa
 //                    }
                 }
 #endif
-            }
+            } // for ix
         } // for iy
     } // for ofs
+
+    consumeF(histo.A);
+    consumeF(histo.B);
 }
 
 // grid size = # of pixels
@@ -201,11 +205,13 @@ __global__ void interpolate_stage2(InterpParams< OutputReal > p, size_t nSamples
     const uint32_t thX = threadIdx.x, bidx = blockIdx.x,
               pos = grid.thread_rank(), total = p.w * p.h;
 
+    const auto NaN = std::nanf("");
+
     //extern __shared__ InputReal sh[];
     for(uint32_t ofs = pos; ofs < total; ofs += grid.size()) {
         auto pix = devPix[ofs];
         auto denom = isnan(pix.denom) ? OutputReal(1) : pix.denom;
-        devOut[ofs] = pix.num / denom;//divApprox(pix.num, denom);
+        devOut[ofs] = (pix.num == 0 && pix.denom == 0) ? NaN : pix.num / pix.denom;//divApprox(pix.num, denom);
     }
 }
 
@@ -243,6 +249,8 @@ bool GPU_interpolator::launchKernel(const InterpParams< OutputReal >& p)
 
     CU_BEGIN_TIMING(0)
 
+    //float fill = std::nanf("");
+    //cuMemsetD32((CUdeviceptr)devPixMem, (int32_t&)(fill), dev_mem_size/sizeof(uint32_t));
     cudaMemset(devPixMem, 0, dev_mem_size);
     // TODO: reading the same data over and over again from pinned memory is inefficient!!!
     // try using memcopy instead..

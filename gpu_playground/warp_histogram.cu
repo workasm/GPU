@@ -14,7 +14,7 @@ namespace cg = cooperative_groups;
 #include "common_types.h"
 #include "common_funcs.cu"
 
-#if 1
+#if 0
 #define PRINTZ(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define PRINTZ(fmt, ...)
@@ -80,7 +80,7 @@ struct WarpHistogramTest
     //using KeyType = std::invoke_result_t< KeyFunc, NT >;
     // Invalid is the value used to initialize A and B (to some large value Key(Invalid) is maximal of KeyType)
     // should reside in shared or constant memory to save registers
-#define Val(s) 0
+#define Val(s) s.y
     NT A = { Invalid },
        B = { Invalid };
 
@@ -93,6 +93,7 @@ struct WarpHistogramTest
         pA[lane] = A;
         pB[lane] = B;
         pC[lane] = C;
+        int fullIdx = -1;
         __syncthreads();
         if(lane == 0) {
             for(int i = 0, j; i < 32; i++) {
@@ -108,13 +109,7 @@ struct WarpHistogramTest
                     }
                 }
                 if(j >= 64) { // ops no space left: need to dump 'A' and 'B' into mem
-                    for(j = 0; j < 64; j++) {
-                        Consume(shm[j]);
-                        Key(shm[j]) = Invalid; // mark it as invalid
-                    }
-                    for(j = i; j < 32; j++) { // the rest of 'C' goes into A
-                        shm[j - i] = pC[j];
-                    }
+                    fullIdx = i;
                     break;
                 }
             } // for i
@@ -122,10 +117,23 @@ struct WarpHistogramTest
         __syncthreads();
         A = pA[lane];
         B = pB[lane];
-        C = pC[lane];
 
-//        PRINTZ("%d Aval/num: %d / %d; Bval/num: %d / %d; Cval/num: %d / %d",
-//               lane, Key(A), Val(A), Key(B), Val(B), Key(C), Val(C));
+        fullIdx = __shfl_sync(0xFFFFFFFF, fullIdx, 0); // read from lane 0
+        if(fullIdx >= 0) {
+            Consume(A);
+            Consume(B);
+            Key(B) = Invalid;
+            int num = 32 - fullIdx;
+            if(lane < num) {
+                A = pC[fullIdx + lane];
+            } else {
+                Key(A) = Invalid;
+            }
+        }
+        __syncthreads();
+
+        PRINTZ("%d Aval/num: %d / %d; Bval/num: %d / %d; Cval/num: %d / %d",
+               lane, Key(A), Val(A), Key(B), Val(B), Key(C), Val(C));
 
 #undef Val
         return true;

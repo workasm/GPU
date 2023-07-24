@@ -284,7 +284,7 @@ static std::tuple<size_t, std::vector< InputReal >> generateGaussian(int w, int 
 
     srand((uint32_t)time(nullptr));
     for(int i = 0; i < 50; i++) {
-
+        // create some holes to make interpolation interesting
         double x = w*(double)rand() / (RAND_MAX+1),
                y = h*(double)rand() / (RAND_MAX+1),
                r = 10 * (double)rand() / (RAND_MAX+1);
@@ -351,7 +351,7 @@ void GPU_interpolator::run() {
     const uint32_t nCols = 128, nRows = 128,
             numDataSigs = 1;
     const float stepX = 1, stepY = 1,
-          innerRad = 3, outerRad = 3;
+          innerRad = 5, outerRad = 5;
 
 //    uint32_t num = 0x55555555;
 //    for(int N = 1; N <= 32; N++) {

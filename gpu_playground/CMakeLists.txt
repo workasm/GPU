@@ -87,7 +87,13 @@ add_custom_command(TARGET ${PROJECT_NAME}
 #    COMMENT "=== running cuda-memcheck ==="
 #)
 
-target_link_libraries(${PROJECT_NAME} ${CUDA_CUDART_LIBRARY} ${OpenCV_LIBS})
+#get_cmake_property(_variableNames VARIABLES)
+#list (SORT _variableNames)
+#foreach (_variableName ${_variableNames})
+#    message(STATUS "${_variableName}=${${_variableName}}")
+#endforeach()
+
+target_link_libraries(${PROJECT_NAME} ${CUDA_CUDART_LIBRARY} ${OpenCV_LIBS} ${CUDA_CUDA_LIBRARY})
 
 
 # Add a special target to clean nvcc generated files.

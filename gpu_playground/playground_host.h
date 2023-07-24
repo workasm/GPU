@@ -57,11 +57,12 @@ bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
 
         for(size_t i = ibeg; i != iend; i += inc) {
 
-            if(checkNaN(ptruth[i]) && checkNaN(pcheckit[i]))
+            bool nan1 = checkNaN(ptruth[i]), nan2 = checkNaN(pcheckit[i]);
+            if(nan1 && nan2)
                 continue;
 
             NT diff = pcheckit[i] - ptruth[i];
-            bool isDiff = std::abs(diff) > eps;
+            bool isDiff = std::abs(diff) > eps || nan1 || nan2;
             if(isDiff)
                 res = false;
 
